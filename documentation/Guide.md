@@ -57,7 +57,7 @@ A script can call exactly what the application registers, and the built-in metho
 | `addRawParameter(name, schema, required = true)` | The parameter's JSON schema, as given |
 | `setRange(name, min, max)`, `setDefault(name, value)` | Checked and applied before the handler runs |
 | `setReturns(type, description, example)` | The example gives the return type its shape, and is what a dry run answers |
-| `setReadOnly(true)` | The method only reads: it runs in a dry run and needs no approval |
+| `setReadOnly(true)` | The method only reads: it is really called in a dry run, and a script that calls nothing else counts as a reading script when it comes to approval |
 | `setGroup(name)` | For the Methods list and for switching whole groups |
 | `setMaxCallsPerRun(n)` | At most `n` calls of this method in one run. For methods that are expensive. 0 (default): only the engine's limit applies |
 
@@ -255,7 +255,21 @@ The user decides the same in the Scripts window, with one check box per kind und
 
 The built-in dialog shows who asks, the code, the arguments and the methods the script uses, marked as reading or changing. The user can run it, test-run it (a dry run, with the result shown in the dialog) or decline with a reason that goes back to the requester. "Do not ask again for this script in this session" remembers the exact code. `setDialogParent(widget)` sets the window it opens over.
 
-`setApprovalHandler(handler)` replaces the dialog with the application's own. The handler gets an `ApprovalRequest` (kind, code, name, arguments, methods, changing methods, whether the script may call more than its source shows) and may call `decide` later, from a window of its own.
+`setApprovalHandler(handler)` replaces the dialog with the application's own. The handler gets an `ApprovalRequest` and may call `decide` later, from a window of its own:
+
+| `ApprovalRequest` | |
+|---|---|
+| `kind` | The `ScriptKind` of the run |
+| `name`, `code`, `args` | The saved script's name (empty for code that came with the request), the code, the arguments |
+| `dryRun` | It is a dry run |
+| `methods`, `changingMethods` | The methods the script uses, and those of them that are not read-only |
+| `dynamic` | The script may call more than its source shows |
+
+| `ApprovalDecision` | |
+|---|---|
+| `approved` | Run it |
+| `reason` | Told to the requester when declined |
+| `rememberForSession` | Do not ask again for this exact code |
 
 Approval applies to `requestRun()` only. `run()` never asks.
 
@@ -291,7 +305,7 @@ for (const id of db.listObjects()) { ... }
 | Editing saved scripts in the Scripts window | `setUserMayEditScripts(bool)` | |
 | Runner and debugger in the editor | `setDebuggerEnabled(bool)` | |
 
-A switch that is locked is shown disabled in the Scripts window, and the `...ByUser` functions refuse to change it.
+A switch that is locked is shown disabled in the Scripts window. A settings window of the application's own changes the switches through `setEnabledByUser(bool)`, `setApprovalRequiredByUser(kind, bool)` and `setMethodEnabledByUser(name, bool)`: they return false, and change nothing, for what is locked.
 
 `userSettings()` returns the user's choices as JSON for the application to store; `applyUserSettings()` puts them back and skips what is locked:
 
@@ -300,6 +314,16 @@ engine->applyUserSettings(QJsonDocument::fromJson(settings.value("scripting").to
 ...
 settings.setValue("scripting", QJsonDocument(engine->userSettings()).toJson(QJsonDocument::Compact));
 ```
+
+The stored object holds only what the user may change:
+
+```json
+{"enabled": true,
+ "approval": {"new_reading": false, "new_changing": true, "saved_reading": false, "saved_changing": true, "dry_run": false},
+ "methods": {"db.readObject": true, "db.setProperty": false}}
+```
+
+The names of the kinds are those of `ScriptEngine::scriptKindKey(kind)`.
 
 ## The Scripts window and the editor
 
@@ -323,9 +347,64 @@ editor->show();
 
 Check, Run and Dry run work on the code as it stands in the editor, saved or not.
 
-Debug starts the script and stops before every method call. The current line is marked, the call and its arguments are shown, and after Step the value it returned. Continue runs on to the next breakpoint (set by a click in the line-number margin) or to `pause("label")` in the script. Combined with a dry run it steps through a script that changes things without changing anything.
+Debug starts the script and stops before its first statement. The current line is marked, and the Variables table shows what the script's variables hold there; a value that changed since the stop before is bold.
 
-Stepping is by method call, not by statement: `QJSEngine` has no debugger interface, and the calls are where a script touches the application. The same is available from code: `RunOptions::debug`, `stepFromStart`, `breakpoints`, then `stepRun()`, `continueRun()` and the signals `runPaused` and `runCallFinished`.
+| Button | |
+|---|---|
+| Step | Runs the statement and stops before the next one, also inside functions of the script |
+| Next call | Runs on to the next method call and shows it with its arguments; the Calls table gets the value it returned |
+| Continue | Runs on to the next breakpoint (set by a click in the line-number margin) or to `pause("label")` in the script |
+
+The engine has no debugger interface, so for a debug run the script is rewritten: a hidden call in front of every statement that starts a line. Stepping is therefore by line - a second statement on a line is not stopped at - and a variable appears from the line after its declaration on. A script whose statements the rewriting cannot tell apart is stepped call by call instead. Normal runs are not rewritten.
+
+The same is available from code: `RunOptions::debug`, `statements`, `stepFromStart`, `breakpoints`, then `stepStatement()`, `stepRun()` (to the next call), `continueRun()` and the signals `runPaused(line, method, arguments, variables)` and `runCallFinished`. `variables` holds each visible variable as the text a debugger shows. Without `statements` a debug run is not rewritten and stops at calls only.
+
+## More of the interface
+
+What the sections above did not need.
+
+| `ScriptEngine` | |
+|---|---|
+| `methods()`, `hasMethod(name)` | The registered methods |
+| `check(code)` returns `Check` | `ok`; when not: `phase` (`syntax` or `check`), `line`, `message`, `didYouMean`. Always: `methods` and `changingMethods` the script uses, `dynamic` (it picks methods by computed names). `toJson()` gives the error as a result object |
+| `RunOptions::external` | Marks the run as requested, in the record and in `runStarted`. `requestRun()` sets it |
+| `RunOptions::readOnlyOnly` | A call to a method that is not read-only stops the script (phase `approval`). `requestRun()` sets it for a script that runs unasked as a reading one |
+| `setBreakpoints(lines)` | Changes the breakpoints of the run that is going on |
+| `runs()`, `clearRuns()` | The runs of the session, oldest first, as `RunRecord`: `started`, `name`, `code`, `args`, `result`, `dryRun`, `external` |
+
+| `ScriptMethod` | |
+|---|---|
+| `signature()` | `db.readObject(id: string): { id: string, name: string }` |
+| `declaration(indent, keyword)` | The TypeScript declaration with its comment, as in the definition |
+| `nameSpace()`, `functionName()` | `db` and `readObject` of `db.readObject` |
+| `parameterSchema()` | The parameters as a JSON schema |
+| `static isValidName(name)` | An identifier, or two joined by a dot |
+| `bindArguments(arguments, named, &error)` | The arguments of a call as the named input a handler gets, checked against the definition |
+
+| `ScriptLibrary` | |
+|---|---|
+| `scripts()`, `script(name)`, `contains(name)` | The scripts sorted by name, as `Script`: `name`, `description`, `parameters` (`name`, `type`, `description`), `code`, `origin`, `filePath`, `readOnly` |
+| `save(script, &error)`, `remove(name, &error)` | Into and out of the writable directory. False with the reason when that is not possible |
+| `changed()` | Signal: a script was saved or removed |
+| `static toFileText(script)`, `fromFileText(text, fallbackName)`, `fileBaseName(name)` | The file format, for an application that stores scripts elsewhere |
+
+`origin` says who saved a script: `user`, `application` (from a read-only directory) or whatever a requester's save puts there - a script with another origin counts as new when it comes to approval.
+
+| `ScriptsWidget` | |
+|---|---|
+| `setLockedVisible(false)` | Leaves locked methods out instead of greying them |
+| `apply()`, `revert()`, `refresh()` | Hands the pending switches to the engine, drops them, reads everything again |
+| Slots `newScript()`, `editScript(name)`, `duplicateScript(name)`, `deleteScript(name, confirm)`, `openFolder()` | What the buttons do, for an application's own menu |
+
+| `ScriptEditorDialog` | |
+|---|---|
+| `setScript(script)`, `script()` | What it edits; what the fields hold now |
+| `setReadOnly(bool)` | For a shipped script: run it, do not change it |
+| Slots `checkScript()`, `runScript(dryRun)`, `debugScript()`, `step()`, `stepToCall()`, `continueRun()`, `stopRun()`, `save(askOnCheckFailure)` | What the buttons do |
+| `breakpoints()`, `toggleBreakpoint(line)`, `pausedLine()`, `errorLine()`, `isOwnRunActive()` | The state of the editor and of its run |
+| `saved(name)` | Signal: the script was saved into the library |
+
+Every control of the two widgets and of the approval dialog has an object name that starts with `scripthost_`, for tests and for tools that address widgets by name. The lists are in the headers.
 
 ## Signals
 
@@ -335,6 +414,6 @@ Stepping is by method call, not by statement: `QJSEngine` has no debugger interf
 | `runLog(text)` | A `log()` line |
 | `runProgress(done, total, text)` | A `progress()` call |
 | `runFinished(result)` | The result object |
-| `runPaused`, `runCallFinished` | Debugger |
+| `runPaused(line, method, arguments, variables)`, `runCallFinished(line, method, arguments, value, error)` | Debugger |
 | `runsChanged()` | `runs()` changed |
 | `enabledChanged(bool)`, `methodsChanged()`, `settingsChanged()` | Switches and locks |

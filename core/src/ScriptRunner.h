@@ -3,6 +3,7 @@
 // Private to the library.
 
 #include <QHash>
+#include <QJSValue>
 #include <QJsonObject>
 #include <QList>
 #include <QMutex>
@@ -39,6 +40,7 @@ struct ScriptRunConfig
     bool compileOnly = false;   // syntax check: nothing is installed, nothing is called
     bool dryRun = false;        // methods that change something are recorded, not called
     bool debug = false;         // stops at calls on request, reports every call
+    bool statements = false;    // debug: stops before statements too, reads variables
     bool readOnlyOnly = false;  // a method that changes something fails the script
 };
 
@@ -54,9 +56,12 @@ struct ScriptRunShared
     bool           resultReady = false;
     QString        result;          // {"v":...} or {"e":"message"}
     // Debugger.
-    bool           stepMode = false;    // stop before the next call
+    enum { RunOn = 0, ToCall = 1, ToStatement = 2 };
+    int            stepMode = RunOn;    // where to stop next, breakpoints aside
     QSet<int>      breakpoints;         // lines
-    int            resume = 0;          // while paused: 0 wait, 1 step, 2 continue
+    // While paused: 0 wait, else go on - 1 to the next call, 2 to the next
+    // breakpoint, 3 to the next statement.
+    int            resume = 0;
 };
 
 class ScriptRunner : public QThread
@@ -75,12 +80,16 @@ public:
 
     // Called by the script (worker thread) for every method call.
     QString handleCall(const QString& name, const QString& argsJson, const QString& stack);
+    // Called by the script (worker thread) before a statement, when it runs
+    // with statement stepping. `read` gives the variables visible there.
+    void handleStep(int line, const QJSValue& read);
 
 signals:
     // The script calls a method of the application; answer through the shared state.
     void callRequested(quint64 id, const QString& name, const QString& argsJson);
-    // Debugger: stopped before this call; continue through the shared state.
-    void paused(int line, const QString& name, const QString& argsJson);
+    // Debugger: stopped before this call, or before a statement (no name);
+    // continue through the shared state. The variables as {"name": "text"}.
+    void paused(int line, const QString& name, const QString& argsJson, const QString& variablesJson);
     // Debugger: a call came back with this payload ({"v":...} / {"e":...}).
     void callReturned(int line, const QString& name, const QString& argsJson, const QString& payloadJson);
     void logged(const QString& text);
@@ -94,6 +103,7 @@ private:
     QJsonObject execute(QJSEngine& engine);
     bool stopRequested(QString* reason = nullptr) const;
     bool waitWhilePaused(int line, const QString& name, const QString& argsJson);
+    QString variablesJson(int line);
     QJsonObject stoppedResult(const QString& reason) const;
 
     ScriptRunConfig                  m_config;
@@ -111,6 +121,12 @@ private:
     int                         m_callCount = 0;
     quint64                     m_nextId = 0;
     QString                     m_limitMessage;
+    // Statement stepping.
+    bool                        m_instrumented = false;
+    QJSValue                    m_formatVariables;  // prelude: a reader's values as JSON text
+    QJSValue                    m_stepScope;        // the reader of the statement last begun
+    int                         m_stepLine = 0;
+    bool                        m_stepPaused = false;   // stopped before that statement
 };
 
 // The object the script's method wrappers talk to.
@@ -123,6 +139,7 @@ public:
     {
         return m_runner->handleCall(name, argsJson, stack);
     }
+    Q_INVOKABLE void step(int line, const QJSValue& read) { m_runner->handleStep(line, read); }
 
 private:
     ScriptRunner* m_runner;

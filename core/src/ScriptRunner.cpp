@@ -1,4 +1,5 @@
 #include "ScriptRunner.h"
+#include "ScriptSource.h"
 
 #include <QDeadlineTimer>
 #include <QElapsedTimer>
@@ -33,6 +34,22 @@ const char* const kPrelude = R"JS((function(native){
                 if (r.e !== undefined) throw new Error(r.e);
                 return r.v;
             };
+        },
+        step: function(line, read){ native.step(line, read); },
+        // The variables a statement's reader gives, as {"name": "value as text"}.
+        vars: function(read){
+            var text = function(v){
+                if (v === undefined) return 'undefined';
+                if (typeof v === 'function') return 'function';
+                if (typeof v === 'number') return String(v);
+                var s;
+                try { s = JSON.stringify(v); } catch (e) { s = undefined; }
+                if (s === undefined) s = String(v);
+                return s.length > 4000 ? s.slice(0, 4000) + '...' : s;
+            };
+            var values = read(), out = {};
+            for (var name in values) out[name] = text(values[name]);
+            return JSON.stringify(out);
         },
         run: function(fn, argsJson){
             try {
@@ -138,6 +155,8 @@ void ScriptRunner::run()
         if (stopRequested())
             engine.setInterrupted(true);
         result = execute(engine);
+        m_stepScope = QJSValue();       // these belong to the engine that ends here
+        m_formatVariables = QJSValue();
         QMutexLocker lock(&m_engineMutex);
         m_engine = nullptr;
     }
@@ -192,11 +211,11 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
 {
     // The script is the body of a function. Wrapper and first line share a
     // line, so line numbers are the script's own.
-    const QString wrapped = QStringLiteral("(function(args){\"use strict\";") + m_config.code
-                            + QStringLiteral("\n})");
+    const QString head = QStringLiteral("(function(args){\"use strict\";");
+    const QString tail = QStringLiteral("\n})");
     // Compiled before any method exists: code that breaks out of the wrapper
     // runs here, where there is nothing for it to call.
-    const QJSValue function = engine.evaluate(wrapped, QLatin1String(kScriptFile));
+    QJSValue function = engine.evaluate(head + m_config.code + tail, QLatin1String(kScriptFile));
     QString reason;
     if (stopRequested(&reason))
         return stoppedResult(reason);
@@ -211,6 +230,18 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
     if (m_config.compileOnly)
         return {{"status", "ok"}};
 
+    if (m_config.debug && m_config.statements) {
+        // ponytail: a script the rewriting breaks is debugged call by call,
+        // without a word about it. A parser instead of the text scan would
+        // end that.
+        const QJSValue stepping = engine.evaluate(
+            head + ScriptSource::instrumentForStepping(m_config.code) + tail, QLatin1String(kScriptFile));
+        if (!stepping.isError() && stepping.isCallable()) {
+            function = stepping;
+            m_instrumented = true;
+        }
+    }
+
     // The engine owns the bridge (an object without a parent handed to
     // newQObject) and deletes it with itself.
     const QJSValue native = engine.newQObject(new ScriptBridge(this));
@@ -219,6 +250,10 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
     QJSValue make = prelude.property(QStringLiteral("make"));
     QJSValue runFunction = prelude.property(QStringLiteral("run"));
     QJSValue global = engine.globalObject();
+    if (m_instrumented) {
+        global.setProperty(QStringLiteral("__sh_step"), prelude.property(QStringLiteral("step")));
+        m_formatVariables = prelude.property(QStringLiteral("vars"));
+    }
     for (const ScriptMethodInfo& method : m_config.methods) {
         const QJSValue callable = make.call({method.name, m_config.debug});
         const int dot = method.name.indexOf(QLatin1Char('.'));
@@ -273,14 +308,43 @@ bool ScriptRunner::waitWhilePaused(int line, const QString& name, const QString&
         QMutexLocker lock(&m_shared->mutex);
         m_shared->resume = 0;
     }
-    emit paused(line, name, argsJson);
+    emit paused(line, name, argsJson, variablesJson(line));
     QMutexLocker lock(&m_shared->mutex);
     while (m_shared->resume == 0 && !m_shared->stop)
         m_shared->wake.wait(&m_shared->mutex);
     if (m_shared->stop)
         return false;
-    m_shared->stepMode = m_shared->resume == 1;
+    m_shared->stepMode = m_shared->resume == 1 ? ScriptRunShared::ToCall
+                         : m_shared->resume == 3 ? ScriptRunShared::ToStatement
+                                                 : ScriptRunShared::RunOn;
     return true;
+}
+
+QString ScriptRunner::variablesJson(int line)
+{
+    // ponytail: only for a stop on the line of the statement last begun. A
+    // call further down a statement that spans lines, or one made after a
+    // function of the script returned, would be shown another scope.
+    if (!m_instrumented || line != m_stepLine || !m_stepScope.isCallable())
+        return QStringLiteral("{}");
+    const QJSValue text = m_formatVariables.call({m_stepScope});
+    return text.isString() ? text.toString() : QStringLiteral("{}");
+}
+
+void ScriptRunner::handleStep(int line, const QJSValue& read)
+{
+    m_stepLine = line;
+    m_stepScope = read;
+    m_stepPaused = false;
+    {
+        QMutexLocker lock(&m_shared->mutex);
+        if (m_shared->stop)
+            return;     // the engine is interrupted; the script ends by itself
+        if (m_shared->stepMode != ScriptRunShared::ToStatement && !m_shared->breakpoints.contains(line))
+            return;
+    }
+    m_stepPaused = true;
+    waitWhilePaused(line, QString(), QStringLiteral("[]"));
 }
 
 QString ScriptRunner::handleCall(const QString& name, const QString& argsJson, const QString& stack)
@@ -322,11 +386,16 @@ QString ScriptRunner::handleCall(const QString& name, const QString& argsJson, c
 
     // ---- debugger: stop before the call
     if (m_config.debug) {
+        // A breakpoint that stopped the script before the statement does not
+        // stop it again before that statement's first call.
+        const bool stoppedAtStatement = m_stepPaused && m_stepLine == line;
+        m_stepPaused = false;
         bool stopHere = false;
         {
             QMutexLocker lock(&m_shared->mutex);
-            stopHere = m_shared->stepMode;
-            for (int i = 0; i < lines.size() && !stopHere; ++i)
+            stopHere = m_shared->stepMode == ScriptRunShared::ToCall
+                       || (m_shared->stepMode == ScriptRunShared::ToStatement && !m_instrumented);
+            for (int i = 0; i < lines.size() && !stopHere && !stoppedAtStatement; ++i)
                 stopHere = m_shared->breakpoints.contains(lines[i]);
         }
         if (stopHere && !waitWhilePaused(line, name, argsJson))

@@ -36,6 +36,7 @@ public:
         ADD_TEST(TST_ScriptEngine::testApiDefinition);
         ADD_TEST(TST_ScriptEngine::testUserSettingsAndLocks);
         ADD_TEST(TST_ScriptEngine::testCallStepping);
+        ADD_TEST(TST_ScriptEngine::testStatementStepping);
     }
 
 private:
@@ -901,6 +902,138 @@ private:
         limits.timeoutMs = 300000;
         engine.setLimits(limits);
         TEST_COMPARE(TestSupport::runScript(engine, "pause('x');\nreturn 7;")["result"].toInt(), 7);
+    }
+
+    // The debugger statement by statement, with the variables at each stop.
+    TEST_FUNCTION(testStatementStepping)
+    {
+        TEST_START;
+
+        Engine engine;
+        Db db;
+        TestSupport::registerDb(engine, db);
+
+        struct Stop { int line; QString method; QJsonObject variables; };
+        QList<Stop> stops;
+        int mode = 0;       // 0 next statement, 1 next call, 2 next breakpoint
+        QObject::connect(&engine, &Engine::runPaused,
+                         [&](int line, const QString& method, const QJsonArray&, const QJsonObject& variables) {
+            stops.append({line, method, variables});
+            if (mode == 0)
+                engine.stepStatement();
+            else if (mode == 1)
+                engine.stepRun();
+            else
+                engine.continueRun();
+        });
+        auto lines = [&stops]() {
+            QStringList text;
+            for (const Stop& s : stops)
+                text << QString::number(s.line);
+            return text.join(' ');
+        };
+
+        const QString code =
+            "const ids = db.list();\n"                       // 1
+            "let n = 0;\n"                                   // 2
+            "for (const id of ids.slice(0, 2)) {\n"          // 3
+            "    const o = db.read(id);\n"                   // 4
+            "    if (o.age > 10)\n"                          // 5
+            "        db.setStatus(id, 'archived');\n"        // 6
+            "    n++;\n"                                     // 7
+            "}\n"                                            // 8
+            "return n;\n";                                   // 9
+
+        Options options;
+        options.debug = true;
+        options.statements = true;
+        options.stepFromStart = true;
+        QJsonObject result = TestSupport::runScript(engine, code, options);
+        TEST_COMPARE(result["result"].toInt(), 2);
+        // Line 6 is the single statement of an if without braces, and only
+        // reached for the second object.
+        TEST_COMPARE(lines(), QString("1 2 3 4 5 7 4 5 6 7 9"));
+        if (stops.size() == 11) {
+            for (const Stop& s : stops)
+                TEST_ASSERT(s.method.isEmpty());
+            // Before line 1 nothing is declared yet.
+            TEST_COMPARE(stops[0].variables["args"].toString(), QString("{}"));
+            TEST_ASSERT(!stops[0].variables.contains("ids"));
+            TEST_ASSERT(stops[1].variables["ids"].toString().startsWith("[\"o1\""));
+            TEST_ASSERT(!stops[1].variables.contains("n"));
+            TEST_COMPARE(stops[2].variables["n"].toString(), QString("0"));
+            TEST_COMPARE(stops[4].variables["id"].toString(), QString("\"o1\""));
+            TEST_ASSERT(stops[4].variables["o"].toString().contains("\"age\":10"));
+            TEST_COMPARE(stops[9].variables["n"].toString(), QString("1"));
+            // After the loop its variables are gone.
+            TEST_COMPARE(stops[10].variables["n"].toString(), QString("2"));
+            TEST_ASSERT(!stops[10].variables.contains("id"));
+        }
+        TEST_COMPARE(db.archived(), 1);
+
+        // Breakpoints stop before the statement, once per time it is reached.
+        stops.clear();
+        mode = 2;
+        Options breakpoints;
+        breakpoints.debug = true;
+        breakpoints.statements = true;
+        breakpoints.breakpoints = QSet<int>{4, 6};
+        result = TestSupport::runScript(engine, code, breakpoints);
+        TEST_COMPARE(result["result"].toInt(), 2);
+        TEST_COMPARE(lines(), QString("4 4 6"));
+        for (const Stop& s : stops)
+            TEST_ASSERT(s.method.isEmpty());
+
+        // From a statement on to the next call.
+        stops.clear();
+        mode = 1;
+        result = TestSupport::runScript(engine, code, options);
+        TEST_COMPARE(result["result"].toInt(), 2);
+        TEST_ASSERT(stops.size() >= 3);
+        if (stops.size() >= 3) {
+            TEST_ASSERT(stops[0].method.isEmpty());
+            TEST_COMPARE(stops[1].method, QString("db.list"));
+            TEST_COMPARE(stops[1].line, 1);
+            TEST_COMPARE(stops[1].variables["args"].toString(), QString("{}"));
+            TEST_COMPARE(stops[2].method, QString("db.read"));
+            TEST_COMPARE(stops[2].line, 4);
+        }
+
+        // What is not JSON is shown all the same; functions of the script are stepped into.
+        stops.clear();
+        mode = 0;
+        result = TestSupport::runScript(engine,
+            "let u;\n"                                       // 1
+            "const twice = function(a) {\n"                  // 2
+            "    return a * 2;\n"                            // 3
+            "};\n"                                           // 4
+            "const half = 1 / 2\n"                           // 5  no semicolon
+            "return twice(half);\n",                         // 6
+            options);
+        TEST_COMPARE(result["result"].toInt(), 1);
+        TEST_COMPARE(lines(), QString("1 2 5 6 3"));
+        if (stops.size() == 5) {
+            TEST_COMPARE(stops[3].variables["u"].toString(), QString("undefined"));
+            TEST_COMPARE(stops[3].variables["twice"].toString(), QString("function"));
+            TEST_COMPARE(stops[3].variables["half"].toString(), QString("0.5"));
+            TEST_COMPARE(stops[4].variables["a"].toString(), QString("0.5"));
+        }
+
+        // A script the debugger cannot split into statements is stepped call by call.
+        stops.clear();
+        result = TestSupport::runScript(engine,
+            "if (true)\n"
+            "    outer: for (;;) break outer;\n"
+            "return db.list().length;\n",
+            options);
+        TEST_COMPARE(result["result"].toInt(), 6);
+        TEST_COMPARE(stops.size(), 1);
+        if (stops.size() == 1) {
+            TEST_COMPARE(stops[0].method, QString("db.list"));
+            TEST_COMPARE(stops[0].line, 3);
+        }
+
+        // Without `statements` nothing of this happens: see testCallStepping.
     }
 };
 

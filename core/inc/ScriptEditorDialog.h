@@ -35,7 +35,8 @@ class ScriptCodeEdit;
 //   scripthost_scriptEditorParameters, scripthost_scriptEditorParameterAdd, scripthost_scriptEditorParameterRemove,
 //   scripthost_scriptEditorCode, scripthost_scriptEditorArgs, scripthost_scriptEditorStatus,
 //   scripthost_scriptEditorCheck, scripthost_scriptEditorRun, scripthost_scriptEditorDryRun,
-//   scripthost_scriptEditorDebug, scripthost_scriptEditorStep, scripthost_scriptEditorContinue,
+//   scripthost_scriptEditorDebug, scripthost_scriptEditorStep, scripthost_scriptEditorStepCall,
+//   scripthost_scriptEditorContinue, scripthost_scriptEditorVariables,
 //   scripthost_scriptEditorStop, scripthost_scriptEditorSave, scripthost_scriptEditorClose,
 //   scripthost_scriptEditorOutputTabs, scripthost_scriptEditorOutput, scripthost_scriptEditorCalls,
 //   scripthost_scriptEditorReferenceSearch, scripthost_scriptEditorReference, scripthost_scriptEditorReferenceText
@@ -71,7 +72,9 @@ public slots:
     // (another run active, arguments not a JSON object).
     bool runScript(bool dryRun = false);
     bool debugScript();
+    // While paused: to the next statement, to the next call, to the next breakpoint.
     void step();
+    void stepToCall();
     void continueRun();
     void stopRun();
     // Saves into the library. A script that fails the check is saved only
@@ -87,7 +90,9 @@ public:
 private:
     bool startRun(bool dryRun, bool debug);
     bool parseArgs(QJsonObject& args);
-    void onPaused(int line, const QString& method, const QJsonArray& arguments);
+    void onPaused(int line, const QString& method, const QJsonArray& arguments, const QJsonObject& variables);
+    void resume(int how);
+    void showVariables(const QJsonObject& variables);
     void onCallFinished(int line, const QString& method, const QJsonArray& arguments,
                         const QJsonValue& value, const QString& error);
     void onOwnRunFinished(const QJsonObject& result);
@@ -110,12 +115,14 @@ private:
     QPushButton*    m_dryRun = nullptr;
     QPushButton*    m_debug = nullptr;
     QPushButton*    m_step = nullptr;
+    QPushButton*    m_stepCall = nullptr;
     QPushButton*    m_continue = nullptr;
     QPushButton*    m_stop = nullptr;
     QPushButton*    m_save = nullptr;
     QTabWidget*     m_outputTabs = nullptr;
     QPlainTextEdit* m_output = nullptr;
     QTableWidget*   m_calls = nullptr;
+    QTableWidget*   m_variables = nullptr;
     QLineEdit*      m_search = nullptr;
     QTreeWidget*    m_reference = nullptr;
     QPlainTextEdit* m_referenceText = nullptr;

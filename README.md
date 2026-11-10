@@ -40,7 +40,7 @@ engine->run("return db.readObject('a1').name;", {}, [](const QJsonObject& result
 - **Requested runs** (`requestRun`) for other programs: a master switch, a requester name the user sees, approval by the user per kind of script (new or saved, reading or changing, dry run), with a built-in dialog (run, test run, decline with a reason) or the application's own handler.
 - **Saved scripts** in `.js` files with a small header; shipped read-only folders next to the user's folder.
 - **Per-method switches** and locks: what scripts may call, and what the user may change. The user's choices as JSON for the application to store.
-- **Widgets**: `ScriptsWidget` (switches, saved scripts, methods, runs of the session) and `ScriptEditorDialog` (editor with method reference, check, run, dry run, and a debugger that steps from method call to method call).
+- **Widgets**: `ScriptsWidget` (switches, saved scripts, methods, runs of the session) and `ScriptEditorDialog` (editor with method reference, check, run, dry run, and a debugger that steps statement by statement or from method call to method call, with breakpoints and the variables at each stop).
 - **Definition** of the methods as TypeScript declarations (`apiDefinition`), for the editor's reference and for programs that write scripts.
 
 The full description is in [documentation/Guide.md](documentation/Guide.md).
@@ -76,3 +76,7 @@ The library, the example and the tests are installed into `installation/`, with 
 ## Using it in another project
 
 ScriptHost follows the [QT_cmake_library_template](https://github.com/KROIA/QT_cmake_library_template). In a project built from the same template, copy `ScriptHost.cmake` from this repository into that project's `dependencies/` folder. On the next configure the library is fetched from GitHub and linked; `SH_LIBRARY_AVAILABLE` is defined, and `#include "ScriptHost.h"` gives all classes.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Qt itself is used under its own license (LGPL or commercial).

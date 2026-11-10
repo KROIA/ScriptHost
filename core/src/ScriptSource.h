@@ -36,5 +36,20 @@ QList<Reference> references(const QString& code,
 // this, globalThis), so a look at the source cannot tell what it will call.
 bool usesDynamicAccess(const QString& code);
 
+// For the debugger: the code with a call
+//   __sh_step(<line>, function(){ ... return {name: value, ...} })
+// in front of every statement that starts a line. The function handed over
+// reads the variables visible at that statement (declaredNames); one that
+// does not exist there, or not yet, is left out. It is a closure and not an
+// eval(): in strict mode the engine's eval does not see local variables.
+// Lines stay where they are. Works on the text, not on a syntax tree: a
+// statement it is not sure about gets no call, and the caller compiles the
+// result and falls back to the original should it not compile.
+QString instrumentForStepping(const QString& code);
+
+// The names the code declares: variables, parameters, catch bindings - and
+// `args`. What the debugger asks the paused scope for.
+QStringList declaredNames(const QString& code);
+
 } // namespace ScriptSource
 } // namespace ScriptHost

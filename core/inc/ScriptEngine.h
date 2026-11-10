@@ -210,8 +210,13 @@ public:
         QJsonObject args;               // `args` in the script
         bool        dryRun = false;     // methods that change something are recorded, not called
         bool        debug = false;      // debugger: see stepRun() and the run* signals
-        bool        stepFromStart = false;   // debugger: stop at the first call
-        QSet<int>   breakpoints;        // debugger: stop at calls on these lines
+        bool        statements = false; // debugger: stop before statements too, and
+                                        // report the variables (stepStatement())
+        bool        stepFromStart = false;   // debugger: stop at the first call - with
+                                             // `statements`, at the first statement
+        QSet<int>   breakpoints;        // debugger: stop at these lines - before a
+                                        // call there, with `statements` before the
+                                        // statement
         bool        external = false;   // for the record: started through requestRun()
         bool        readOnlyOnly = false;    // a changing method fails the script
     };
@@ -219,8 +224,8 @@ public:
     // Starts a script. One runs at a time: returns false, with the callback
     // called with the error, when one is running. The result:
     //   {"status":"ok","result":...,"calls":{...},"duration_ms":N,"log":[...]}
-    //   {"status":"error","phase":"syntax"|"runtime"|"limit"|"cancelled",
-    //    "line":N,"message":"..."}
+    //   {"status":"error","phase":"syntax"|"runtime"|"limit"|"cancelled"|
+    //    "approval"|"unavailable","line":N,"message":"..."}
     bool run(const QString& code, const RunOptions& options = RunOptions(), RunCallback done = nullptr);
     bool isRunning() const;
     // True while the script running was started through requestRun().
@@ -244,8 +249,11 @@ public:
     void requestRun(const Request& request, RunCallback done,
                     std::function<bool()> abandoned = nullptr);
 
-    // Debugger, while a run is paused (runPaused): one call further, or on to
+    // Debugger, while a run is paused (runPaused): one statement further
+    // (a run with RunOptions::statements; a script whose statements cannot be
+    // told apart is stepped call by call), one call further, or on to
     // the next breakpoint.
+    void stepStatement();
     void stepRun();
     void continueRun();
     void setBreakpoints(const QSet<int>& lines);
@@ -284,8 +292,12 @@ signals:
     void settingsChanged();
 
     void runStarted(const QString& name, bool external);
-    // Debugger: stopped before `method` is called from `line`.
-    void runPaused(int line, const QString& method, const QJsonArray& arguments);
+    // Debugger: stopped in `line` - before `method` is called, or before the
+    // statement there (`method` empty). `variables` are those visible at that
+    // statement, each as the text a debugger shows: {"n": "3", "id": "\"o1\""}.
+    // Empty in a run without RunOptions::statements.
+    void runPaused(int line, const QString& method, const QJsonArray& arguments,
+                   const QJsonObject& variables);
     // Debugger: the call returned `value`, or failed with `error`.
     void runCallFinished(int line, const QString& method, const QJsonArray& arguments,
                          const QJsonValue& value, const QString& error);

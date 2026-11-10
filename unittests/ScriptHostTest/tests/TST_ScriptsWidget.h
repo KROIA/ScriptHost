@@ -402,25 +402,40 @@ private:
             return;
         TEST_ASSERT(!step->isEnabled());
 
-        // Stops before the first call.
+        // Stops before the first statement: nothing called yet, nothing declared yet.
+        auto* variables = editor.findChild<QTableWidget*>("scripthost_scriptEditorVariables");
+        auto variable = [variables](const QString& name) {
+            for (int row = 0; row < variables->rowCount(); ++row) {
+                if (variables->item(row, 0)->text() == name)
+                    return variables->item(row, 1)->text();
+            }
+            return QString("(none)");
+        };
         TEST_ASSERT(editor.debugScript());
         TEST_ASSERT(TestSupport::spin([&]() { return editor.pausedLine() == 1; }));
         TEST_ASSERT(step->isEnabled());
         TEST_ASSERT(stop->isEnabled());
         TEST_ASSERT(!runButton->isEnabled());
-        TEST_COMPARE(calls->rowCount(), 1);
-        if (calls->rowCount() >= 1) {
-            TEST_ASSERT(calls->item(0, 1)->text().contains("about to call db.list()"));
-        }
+        TEST_COMPARE(calls->rowCount(), 0);
+        TEST_COMPARE(variable("args"), QString("{}"));
+        TEST_COMPARE(variable("ids"), QString("(none)"));
 
-        // One call further.
+        // One statement further: the call of line 1 is made, its value in `ids`.
         editor.step();
         TEST_ASSERT(TestSupport::spin([&]() { return editor.pausedLine() == 2; }));
-        TEST_COMPARE(calls->rowCount(), 2);
-        if (calls->rowCount() == 2) {
+        TEST_COMPARE(calls->rowCount(), 1);
+        if (calls->rowCount() == 1) {
             TEST_COMPARE(calls->item(0, 1)->text(), QString("db.list()"));
             TEST_ASSERT(calls->item(0, 2)->text().startsWith("[\"o1\""));
-            TEST_ASSERT(calls->item(1, 1)->text().contains("db.read(\"o1\")"));
+        }
+        TEST_ASSERT(variable("ids").startsWith("[\"o1\""));
+
+        // On to the next call: the one of this line.
+        editor.stepToCall();
+        TEST_ASSERT(TestSupport::spin([&]() { return calls->rowCount() == 2; }));
+        TEST_COMPARE(editor.pausedLine(), 2);
+        if (calls->rowCount() == 2) {
+            TEST_ASSERT(calls->item(1, 1)->text().contains("about to call db.read(\"o1\")"));
         }
 
         editor.resize(1000, 700);
@@ -431,6 +446,9 @@ private:
         TEST_ASSERT(editor.breakpoints().contains(5));
         editor.continueRun();
         TEST_ASSERT(TestSupport::spin([&]() { return editor.pausedLine() == 5; }));
+        TEST_COMPARE(variable("n"), QString("0"));
+        TEST_COMPARE(variable("id"), QString("\"o1\""));
+        TEST_ASSERT(variable("first").contains("\"age\":10"));
         editor.toggleBreakpoint(5);
         TEST_ASSERT(editor.breakpoints().isEmpty());
         editor.continueRun();

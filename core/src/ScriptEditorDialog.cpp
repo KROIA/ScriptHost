@@ -363,7 +363,26 @@ ScriptEditorDialog::ScriptEditorDialog(ScriptEngine* scripting, QWidget* parent)
     m_calls->horizontalHeader()->setStretchLastSection(true);
     m_calls->setColumnWidth(1, 320);
     m_outputTabs->addTab(m_calls, tr("Calls"));
-    lowerLayout->addWidget(m_outputTabs, 1);
+
+    // The variables where the debugger stopped, next to output and calls.
+    m_variables = new QTableWidget(0, 2, lower);
+    m_variables->setObjectName(QStringLiteral("scripthost_scriptEditorVariables"));
+    m_variables->setHorizontalHeaderLabels({tr("Variable"), tr("Value")});
+    m_variables->verticalHeader()->setVisible(false);
+    m_variables->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_variables->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_variables->setWordWrap(false);
+    m_variables->setFont(fixed);
+    m_variables->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_variables->horizontalHeader()->setStretchLastSection(true);
+    m_variables->setToolTip(tr("What the script's variables hold where the debugger stopped. "
+                               "Bold: changed since the stop before."));
+    auto* outputSplit = new QSplitter(Qt::Horizontal, lower);
+    outputSplit->addWidget(m_outputTabs);
+    outputSplit->addWidget(m_variables);
+    outputSplit->setStretchFactor(0, 3);
+    outputSplit->setStretchFactor(1, 2);
+    lowerLayout->addWidget(outputSplit, 1);
 
     rows->addWidget(m_code);
     rows->addWidget(lower);
@@ -426,8 +445,11 @@ ScriptEditorDialog::ScriptEditorDialog(ScriptEngine* scripting, QWidget* parent)
     m_dryRun   = button(tr("Dry run"), "scripthost_scriptEditorDryRun",
                         tr("Methods that change something are recorded, not called."));
     m_debug    = button(tr("Debug"), "scripthost_scriptEditorDebug",
-                        tr("Runs the script and stops before its first call and at breakpoints."));
-    m_step     = button(tr("Step"), "scripthost_scriptEditorStep", tr("Makes the call and stops before the next one."));
+                        tr("Runs the script and stops before its first statement and at breakpoints."));
+    m_step     = button(tr("Step"), "scripthost_scriptEditorStep",
+                        tr("Runs the statement and stops before the next one."));
+    m_stepCall = button(tr("Next call"), "scripthost_scriptEditorStepCall",
+                        tr("Runs on and stops before the next method call."));
     m_continue = button(tr("Continue"), "scripthost_scriptEditorContinue", tr("Runs on to the next breakpoint."));
     m_stop     = button(tr("Stop"), "scripthost_scriptEditorStop", tr("Ends the run."));
     buttons->addStretch();
@@ -440,6 +462,7 @@ ScriptEditorDialog::ScriptEditorDialog(ScriptEngine* scripting, QWidget* parent)
     connect(m_dryRun, &QPushButton::clicked, this, [this]() { runScript(true); });
     connect(m_debug, &QPushButton::clicked, this, &ScriptEditorDialog::debugScript);
     connect(m_step, &QPushButton::clicked, this, &ScriptEditorDialog::step);
+    connect(m_stepCall, &QPushButton::clicked, this, &ScriptEditorDialog::stepToCall);
     connect(m_continue, &QPushButton::clicked, this, &ScriptEditorDialog::continueRun);
     connect(m_stop, &QPushButton::clicked, this, &ScriptEditorDialog::stopRun);
     connect(m_save, &QPushButton::clicked, this, [this]() { save(true); });
@@ -607,11 +630,13 @@ bool ScriptEditorDialog::startRun(bool dryRun, bool debug)
     options.name = m_name->text().trimmed();
     options.dryRun = dryRun;
     options.debug = debug;
+    options.statements = debug;
     options.stepFromStart = debug;
     options.breakpoints = m_code->breakpoints();
 
     m_output->clear();
     m_calls->setRowCount(0);
+    m_variables->setRowCount(0);
     m_pendingRow = -1;
     m_paused = false;
     m_pausedLine = 0;
@@ -632,13 +657,51 @@ bool ScriptEditorDialog::startRun(bool dryRun, bool debug)
     return started;
 }
 
-void ScriptEditorDialog::onPaused(int line, const QString& method, const QJsonArray& arguments)
+void ScriptEditorDialog::showVariables(const QJsonObject& variables)
+{
+    // What changed since the stop before stands out.
+    QHash<QString, QString> before;
+    for (int row = 0; row < m_variables->rowCount(); ++row)
+        before.insert(m_variables->item(row, 0)->text(), m_variables->item(row, 1)->toolTip());
+    const bool first = m_variables->rowCount() == 0;
+
+    m_variables->setRowCount(0);
+    for (auto it = variables.constBegin(); it != variables.constEnd(); ++it) {
+        const int row = m_variables->rowCount();
+        const QString value = it.value().toString();
+        m_variables->insertRow(row);
+        m_variables->setItem(row, 0, new QTableWidgetItem(it.key()));
+        auto* shown = new QTableWidgetItem(value.left(300));
+        shown->setToolTip(value);
+        if (!first && before.value(it.key()) != value) {
+            QFont bold = shown->font();
+            bold.setBold(true);
+            shown->setFont(bold);
+        }
+        m_variables->setItem(row, 1, shown);
+    }
+}
+
+void ScriptEditorDialog::onPaused(int line, const QString& method, const QJsonArray& arguments,
+                                  const QJsonObject& variables)
 {
     if (!m_ownRun)
         return;
     settlePendingCall();
     m_paused = true;
     m_pausedLine = line;
+    m_code->setCurrentLine(line);
+    // A stop before a call further down a statement comes without variables;
+    // those of the statement stay.
+    if (method.isEmpty() || !variables.isEmpty())
+        showVariables(variables);
+    if (method.isEmpty()) {
+        // Before a statement: no call is about to happen.
+        m_pendingRow = -1;
+        showStatus(tr("Paused in line %1").arg(line), false);
+        updateButtons();
+        return;
+    }
     m_pendingRow = m_calls->rowCount();
     m_calls->insertRow(m_pendingRow);
     m_calls->setItem(m_pendingRow, 0, new QTableWidgetItem(QString::number(line)));
@@ -647,7 +710,6 @@ void ScriptEditorDialog::onPaused(int line, const QString& method, const QJsonAr
     m_calls->setItem(m_pendingRow, 1, call);
     m_calls->setItem(m_pendingRow, 2, new QTableWidgetItem());
     m_calls->scrollToItem(call);
-    m_code->setCurrentLine(line);
     showStatus(tr("Paused in line %1 before %2").arg(QString::number(line), method), false);
     updateButtons();
 }
@@ -693,7 +755,8 @@ void ScriptEditorDialog::onCallFinished(int line, const QString& method, const Q
     m_calls->scrollToItem(returned);
 }
 
-void ScriptEditorDialog::step()
+// how: 0 to the next statement, 1 to the next call, 2 to the next breakpoint.
+void ScriptEditorDialog::resume(int how)
 {
     if (!m_ownRun || !m_paused || !m_scripting)
         return;
@@ -701,20 +764,28 @@ void ScriptEditorDialog::step()
     m_pausedLine = 0;
     settlePendingCall();
     m_code->setCurrentLine(0);
-    m_scripting->stepRun();
+    if (how == 0)
+        m_scripting->stepStatement();
+    else if (how == 1)
+        m_scripting->stepRun();
+    else
+        m_scripting->continueRun();
     updateButtons();
+}
+
+void ScriptEditorDialog::step()
+{
+    resume(0);
+}
+
+void ScriptEditorDialog::stepToCall()
+{
+    resume(1);
 }
 
 void ScriptEditorDialog::continueRun()
 {
-    if (!m_ownRun || !m_paused || !m_scripting)
-        return;
-    m_paused = false;
-    m_pausedLine = 0;
-    settlePendingCall();
-    m_code->setCurrentLine(0);
-    m_scripting->continueRun();
-    updateButtons();
+    resume(2);
 }
 
 void ScriptEditorDialog::stopRun()
@@ -763,8 +834,11 @@ void ScriptEditorDialog::updateButtons()
     m_debug->setEnabled(available && !running);
     m_debug->setVisible(debugger);
     m_step->setVisible(debugger);
+    m_stepCall->setVisible(debugger);
     m_continue->setVisible(debugger);
+    m_variables->setVisible(debugger);
     m_step->setEnabled(m_ownRun && m_paused);
+    m_stepCall->setEnabled(m_ownRun && m_paused);
     m_continue->setEnabled(m_ownRun && m_paused);
     m_stop->setEnabled(m_ownRun && running);
     m_save->setEnabled(!m_readOnly && m_scripting && m_scripting->userMayEditScripts() && m_scripting->library());

@@ -648,6 +648,15 @@ void ScriptEngine::stop()
         m_runner->requestStop(QStringLiteral("cancelled"));
 }
 
+void ScriptEngine::stepStatement()
+{
+    if (!m_shared)
+        return;
+    QMutexLocker lock(&m_shared->mutex);
+    m_shared->resume = 3;
+    m_shared->wake.wakeAll();
+}
+
 void ScriptEngine::stepRun()
 {
     if (!m_shared)
@@ -697,6 +706,7 @@ bool ScriptEngine::run(const QString& code, const RunOptions& options, RunCallba
     config.maxLogLines = m_limits.maxLogLines;
     config.dryRun = options.dryRun;
     config.debug = options.debug;
+    config.statements = options.debug && options.statements;
     config.readOnlyOnly = options.readOnlyOnly;
 
     // The methods as they are now; what changes during the run does not reach it.
@@ -717,7 +727,9 @@ bool ScriptEngine::run(const QString& code, const RunOptions& options, RunCallba
     }
 
     m_shared = QSharedPointer<ScriptRunShared>::create();
-    m_shared->stepMode = options.debug && options.stepFromStart;
+    m_shared->stepMode = !(options.debug && options.stepFromStart) ? ScriptRunShared::RunOn
+                         : options.statements ? ScriptRunShared::ToStatement
+                                              : ScriptRunShared::ToCall;
     m_shared->breakpoints = options.breakpoints;
     m_runCallback = std::move(done);
     m_runRecord = RunRecord();
@@ -738,9 +750,10 @@ bool ScriptEngine::run(const QString& code, const RunOptions& options, RunCallba
             onCallRequested(id, name, argsJson);
     });
     connect(runner, &ScriptRunner::paused, this,
-            [this, runner](int line, const QString& name, const QString& argsJson) {
+            [this, runner](int line, const QString& name, const QString& argsJson, const QString& variablesJson) {
         if (runner == m_runner)
-            emit runPaused(line, name, QJsonDocument::fromJson(argsJson.toUtf8()).array());
+            emit runPaused(line, name, QJsonDocument::fromJson(argsJson.toUtf8()).array(),
+                           QJsonDocument::fromJson(variablesJson.toUtf8()).object());
     });
     connect(runner, &ScriptRunner::callReturned, this,
             [this, runner](int line, const QString& name, const QString& argsJson, const QString& payloadJson) {
