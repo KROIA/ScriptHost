@@ -5,11 +5,11 @@
 #include "ScriptEngine.h"
 
 #include <QCheckBox>
-#include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFontDatabase>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QJsonArray>
@@ -95,25 +95,45 @@ ScriptsWidget::ScriptsWidget(QWidget* parent)
     enabledRow->addStretch();
     form->addRow(enabledRow);
 
-    auto* approvalRow = new QHBoxLayout();
-    m_approval = new QComboBox(m_content);
-    m_approval->setObjectName(QStringLiteral("scripthost_scriptsApproval"));
-    m_approval->addItem(tr("Never"), int(ScriptEngine::Approval::Never));
-    m_approval->addItem(tr("Scripts that change something"), int(ScriptEngine::Approval::ChangingScripts));
-    m_approval->addItem(tr("Always"), int(ScriptEngine::Approval::Always));
+    // One check box per kind of script: new ones left, saved ones right.
+    struct KindRow
+    {
+        ScriptEngine::ScriptKind kind;
+        QString text, tip;
+        int row, column;
+    };
+    const QString newTip = tr("A script written for the request, or one the requester saved itself.");
+    const QString savedTip = tr("A script from the list below that you saved or that came with the "
+                                "application, run by its name.");
+    const KindRow kindRows[] = {     // in the order of the enum
+        {ScriptEngine::ScriptKind::NewReading, tr("New scripts that only read"), newTip, 0, 0},
+        {ScriptEngine::ScriptKind::NewChanging, tr("New scripts that change something"), newTip, 1, 0},
+        {ScriptEngine::ScriptKind::SavedReading, tr("Saved scripts that only read"), savedTip, 0, 1},
+        {ScriptEngine::ScriptKind::SavedChanging, tr("Saved scripts that change something"), savedTip, 1, 1},
+        {ScriptEngine::ScriptKind::DryRun, tr("Dry runs"),
+         tr("A run in which methods that change something are only recorded, not called."), 2, 0},
+    };
+    auto* approvalGrid = new QGridLayout();
+    for (const KindRow& kindRow : kindRows) {
+        auto* box = new QCheckBox(kindRow.text, m_content);
+        box->setObjectName(QStringLiteral("scripthost_scriptsAsk_") + ScriptEngine::scriptKindKey(kindRow.kind));
+        box->setToolTip(kindRow.tip);
+        approvalGrid->addWidget(box, kindRow.row, kindRow.column);
+        m_approval.append(box);
+        const int kind = int(kindRow.kind);
+        connect(box, &QCheckBox::toggled, this, [this, kind](bool on) {
+            m_pendingApproval.insert(kind, on);
+            userChanged();
+        });
+    }
     m_approvalHint = hintLabel("scripthost_scriptsApprovalHint", m_content);
-    approvalRow->addWidget(m_approval);
-    approvalRow->addWidget(m_approvalHint);
-    approvalRow->addStretch();
-    form->addRow(tr("Ask before running:"), approvalRow);
+    approvalGrid->addWidget(m_approvalHint, 2, 1);
+    approvalGrid->setColumnStretch(2, 1);
+    form->addRow(tr("Ask before running:"), approvalGrid);
     layout->addLayout(form);
 
     connect(m_enabled, &QCheckBox::toggled, this, [this](bool on) {
         m_pendingEnabled = on ? 1 : 0;
-        userChanged();
-    });
-    connect(m_approval, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-        m_pendingApproval = m_approval->currentData().toInt();
         userChanged();
     });
 
@@ -210,7 +230,7 @@ void ScriptsWidget::setScripting(ScriptEngine* scripting)
         m_scripting->disconnect(this);
     m_scripting = scripting;
     m_pendingEnabled = -1;
-    m_pendingApproval = -1;
+    m_pendingApproval.clear();
     m_pendingMethods.clear();
     if (m_scripting) {
         connect(m_scripting, &ScriptEngine::enabledChanged, this, &ScriptsWidget::refreshSwitches);
@@ -258,12 +278,13 @@ void ScriptsWidget::apply()
     m_applying = true;
     if (m_pendingEnabled >= 0)
         m_scripting->setEnabledByUser(m_pendingEnabled == 1);
-    if (m_pendingApproval >= 0)
-        m_scripting->setApprovalByUser(static_cast<ScriptEngine::Approval>(m_pendingApproval));
+    const QMap<int, bool> pendingApproval = m_pendingApproval;
     const QMap<QString, bool> pending = m_pendingMethods;
     m_pendingEnabled = -1;
-    m_pendingApproval = -1;
+    m_pendingApproval.clear();
     m_pendingMethods.clear();
+    for (auto it = pendingApproval.constBegin(); it != pendingApproval.constEnd(); ++it)
+        m_scripting->setApprovalRequiredByUser(static_cast<ScriptEngine::ScriptKind>(it.key()), it.value());
     for (auto it = pending.constBegin(); it != pending.constEnd(); ++it)
         m_scripting->setMethodEnabledByUser(it.key(), it.value());
     m_applying = false;
@@ -273,7 +294,7 @@ void ScriptsWidget::apply()
 void ScriptsWidget::revert()
 {
     m_pendingEnabled = -1;
-    m_pendingApproval = -1;
+    m_pendingApproval.clear();
     m_pendingMethods.clear();
     refreshSwitches();
     refreshMethods();
@@ -292,7 +313,6 @@ void ScriptsWidget::refresh()
 void ScriptsWidget::refreshSwitches()
 {
     const QSignalBlocker blockEnabled(m_enabled);
-    const QSignalBlocker blockApproval(m_approval);
     if (!m_scripting) {
         m_enabledHint->hide();
         m_approvalHint->hide();
@@ -301,16 +321,22 @@ void ScriptsWidget::refreshSwitches()
     // Who asks is the application's to say: "the assistant", "the plugin".
     m_enabled->setText(tr("Allow %1 to run scripts").arg(m_scripting->requesterName()));
     const bool enabledLocked = !m_scripting->isEnabledUserConfigurable();
-    const bool approvalLocked = !m_scripting->isApprovalUserConfigurable();
     m_enabled->setChecked(!enabledLocked && m_pendingEnabled >= 0 ? m_pendingEnabled == 1
                                                                   : m_scripting->isEnabled());
     m_enabled->setEnabled(!enabledLocked);
     m_enabledHint->setVisible(enabledLocked);
-    const int approval = !approvalLocked && m_pendingApproval >= 0 ? m_pendingApproval
-                                                                    : int(m_scripting->approval());
-    m_approval->setCurrentIndex(m_approval->findData(approval));
-    m_approval->setEnabled(!approvalLocked);
-    m_approvalHint->setVisible(approvalLocked);
+    bool anyApprovalLocked = false;
+    for (int kind = 0; kind < m_approval.size(); ++kind) {
+        QCheckBox* box = m_approval[kind];
+        const QSignalBlocker blockBox(box);
+        const auto scriptKind = static_cast<ScriptEngine::ScriptKind>(kind);
+        const bool locked = !m_scripting->isApprovalUserConfigurable(scriptKind);
+        box->setChecked(!locked && m_pendingApproval.contains(kind) ? m_pendingApproval.value(kind)
+                                                                    : m_scripting->isApprovalRequired(scriptKind));
+        box->setEnabled(!locked);
+        anyApprovalLocked = anyApprovalLocked || locked;
+    }
+    m_approvalHint->setVisible(anyApprovalLocked);
 }
 
 void ScriptsWidget::refreshScripts()

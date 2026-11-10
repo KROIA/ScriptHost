@@ -734,12 +734,13 @@ private:
 
         // The user's choices, out and back in.
         TEST_ASSERT(engine.setEnabledByUser(false));
-        TEST_ASSERT(engine.setApprovalByUser(Engine::Approval::ChangingScripts));
+        TEST_ASSERT(engine.setApprovalRequiredByUser(Engine::ScriptKind::NewChanging, true));
         TEST_ASSERT(engine.setMethodEnabledByUser("db.setStatus", false));
         TEST_ASSERT(!engine.setMethodEnabledByUser("db.unknown", false));
         const QJsonObject saved = engine.userSettings();
         TEST_COMPARE(saved["enabled"].toBool(), false);
-        TEST_COMPARE(saved["approval"].toString(), QString("changing"));
+        TEST_COMPARE(saved["approval"].toObject()["new_changing"].toBool(), true);
+        TEST_COMPARE(saved["approval"].toObject()["saved_changing"].toBool(), false);
         TEST_COMPARE(saved["methods"].toObject()["db.setStatus"].toBool(), false);
         TEST_COMPARE(saved["methods"].toObject()["db.read"].toBool(), true);
 
@@ -748,7 +749,8 @@ private:
         TestSupport::registerDb(other, db2);
         other.applyUserSettings(saved);
         TEST_ASSERT(!other.isEnabled());
-        TEST_COMPARE(int(other.approval()), int(Engine::Approval::ChangingScripts));
+        TEST_ASSERT(other.isApprovalRequired(Engine::ScriptKind::NewChanging));
+        TEST_ASSERT(!other.isApprovalRequired(Engine::ScriptKind::SavedChanging));
         TEST_ASSERT(!other.isMethodEnabled("db.setStatus"));
         TEST_ASSERT(other.isMethodEnabled("db.read"));
 
@@ -764,7 +766,7 @@ private:
         locked.setMethodUserConfigurable("db.setStatus", false);
         locked.setMethodGroupUserConfigurable("Script", false);
         TEST_ASSERT(!locked.setEnabledByUser(false));
-        TEST_ASSERT(!locked.setApprovalByUser(Engine::Approval::Never));
+        TEST_ASSERT(!locked.setApprovalRequiredByUser(Engine::ScriptKind::DryRun, false));
         TEST_ASSERT(!locked.setMethodEnabledByUser("db.setStatus", true));
         TEST_ASSERT(!locked.setMethodEnabledByUser("log", false));
         TEST_ASSERT(locked.setMethodEnabledByUser("db.read", false));
@@ -774,7 +776,7 @@ private:
         locked.applyUserSettings(QJsonObject{{"enabled", false}, {"approval", "never"},
             {"methods", QJsonObject{{"db.setStatus", true}, {"db.list", false}}}});
         TEST_ASSERT(locked.isEnabled());
-        TEST_COMPARE(int(locked.approval()), int(Engine::Approval::Always));
+        TEST_ASSERT(locked.isApprovalRequired(Engine::ScriptKind::NewReading));
         TEST_ASSERT(!locked.isMethodEnabled("db.setStatus"));
         TEST_ASSERT(!locked.isMethodEnabled("db.list"));
         const QJsonObject lockedSettings = locked.userSettings();

@@ -1,4 +1,5 @@
 #include "ScriptEngine.h"
+#include "ScriptHighlighter.h"
 #include "ScriptLibrary.h"
 #include "ScriptRunner.h"
 #include "ScriptSchema.h"
@@ -51,14 +52,15 @@ QJsonObject scriptError(const QString& phase, const QString& message)
     return {{"status", "error"}, {"phase", phase}, {"message", message}};
 }
 
-QString approvalName(ScriptEngine::Approval approval)
+// In the order of ScriptEngine::ScriptKind.
+const char* const kKindKeys[ScriptEngine::ScriptKindCount] = {
+    "new_reading", "new_changing", "saved_reading", "saved_changing", "dry_run"};
+
+bool presetRequires(ScriptEngine::Approval approval, ScriptEngine::ScriptKind kind)
 {
-    switch (approval) {
-    case ScriptEngine::Approval::ChangingScripts: return QStringLiteral("changing");
-    case ScriptEngine::Approval::Always:          return QStringLiteral("always");
-    case ScriptEngine::Approval::Never:           break;
-    }
-    return QStringLiteral("never");
+    if (approval == ScriptEngine::Approval::ChangingScripts)
+        return kind == ScriptEngine::ScriptKind::NewChanging || kind == ScriptEngine::ScriptKind::SavedChanging;
+    return approval == ScriptEngine::Approval::Always;
 }
 
 // First sentence of a description, for one-line listings.
@@ -193,27 +195,65 @@ void ScriptEngine::setRequesterName(const QString& name)
     emit settingsChanged();
 }
 
+QString ScriptEngine::scriptKindKey(ScriptKind kind)
+{
+    return QString::fromLatin1(kKindKeys[int(kind)]);
+}
+
+void ScriptEngine::setApprovalRequired(ScriptKind kind, bool required)
+{
+    if (m_approvalRequired[int(kind)] == required)
+        return;
+    m_approvalRequired[int(kind)] = required;
+    emit settingsChanged();
+}
+
+bool ScriptEngine::isApprovalRequired(ScriptKind kind) const
+{
+    return m_approvalRequired[int(kind)];
+}
+
 void ScriptEngine::setApproval(Approval approval)
 {
-    if (m_approval == approval)
+    bool differs = false;
+    for (int i = 0; i < ScriptKindCount; ++i) {
+        const bool required = presetRequires(approval, static_cast<ScriptKind>(i));
+        differs = differs || m_approvalRequired[i] != required;
+        m_approvalRequired[i] = required;
+    }
+    if (differs)
+        emit settingsChanged();
+}
+
+void ScriptEngine::setApprovalUserConfigurable(ScriptKind kind, bool configurable)
+{
+    if (m_approvalConfigurable[int(kind)] == configurable)
         return;
-    m_approval = approval;
+    m_approvalConfigurable[int(kind)] = configurable;
     emit settingsChanged();
 }
 
 void ScriptEngine::setApprovalUserConfigurable(bool configurable)
 {
-    if (m_approvalUserConfigurable == configurable)
-        return;
-    m_approvalUserConfigurable = configurable;
-    emit settingsChanged();
+    bool differs = false;
+    for (int i = 0; i < ScriptKindCount; ++i) {
+        differs = differs || m_approvalConfigurable[i] != configurable;
+        m_approvalConfigurable[i] = configurable;
+    }
+    if (differs)
+        emit settingsChanged();
 }
 
-bool ScriptEngine::setApprovalByUser(Approval approval)
+bool ScriptEngine::isApprovalUserConfigurable(ScriptKind kind) const
 {
-    if (!m_approvalUserConfigurable)
+    return m_approvalConfigurable[int(kind)];
+}
+
+bool ScriptEngine::setApprovalRequiredByUser(ScriptKind kind, bool required)
+{
+    if (!m_approvalConfigurable[int(kind)])
         return false;
-    setApproval(approval);
+    setApprovalRequired(kind, required);
     return true;
 }
 
@@ -846,6 +886,7 @@ void ScriptEngine::askApproval(const ApprovalRequest& request,
     code->setReadOnly(true);
     code->setLineWrapMode(QPlainTextEdit::NoWrap);
     code->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    new JsHighlighter(code->document());
     code->setPlainText(request.code);
     layout->addWidget(code, 1);
 
@@ -938,8 +979,13 @@ QJsonObject ScriptEngine::userSettings() const
     QJsonObject settings;
     if (m_enabledUserConfigurable)
         settings["enabled"] = m_enabled;
-    if (m_approvalUserConfigurable)
-        settings["approval"] = approvalName(m_approval);
+    QJsonObject approval;
+    for (int i = 0; i < ScriptKindCount; ++i) {
+        if (m_approvalConfigurable[i])
+            approval.insert(QString::fromLatin1(kKindKeys[i]), m_approvalRequired[i]);
+    }
+    if (!approval.isEmpty())
+        settings["approval"] = approval;
     QJsonObject methods;
     const QList<Entry>& all = m_registered;
     for (const Entry& entry : all) {
@@ -954,11 +1000,22 @@ void ScriptEngine::applyUserSettings(const QJsonObject& settings)
 {
     if (settings.contains("enabled"))
         setEnabledByUser(settings.value("enabled").toBool());
-    if (settings.contains("approval")) {
-        const QString approval = settings.value("approval").toString();
-        setApprovalByUser(approval == QLatin1String("always") ? Approval::Always
-                          : approval == QLatin1String("changing") ? Approval::ChangingScripts
-                                                                  : Approval::Never);
+    const QJsonValue approval = settings.value("approval");
+    if (approval.isObject()) {
+        const QJsonObject kinds = approval.toObject();
+        for (int i = 0; i < ScriptKindCount; ++i) {
+            const QString key = QString::fromLatin1(kKindKeys[i]);
+            if (kinds.contains(key))
+                setApprovalRequiredByUser(static_cast<ScriptKind>(i), kinds.value(key).toBool());
+        }
+    } else if (approval.isString()) {
+        // Stored when there were three modes instead of kinds.
+        const QString mode = approval.toString();
+        const Approval preset = mode == QLatin1String("always") ? Approval::Always
+                                : mode == QLatin1String("changing") ? Approval::ChangingScripts
+                                                                    : Approval::Never;
+        for (int i = 0; i < ScriptKindCount; ++i)
+            setApprovalRequiredByUser(static_cast<ScriptKind>(i), presetRequires(preset, static_cast<ScriptKind>(i)));
     }
     const QJsonObject methods = settings.value("methods").toObject();
     for (auto it = methods.begin(); it != methods.end(); ++it)
@@ -980,6 +1037,7 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
 
     QString code = request.code;
     QString name;
+    bool saved = false;
     if (code.trimmed().isEmpty() && !request.name.trimmed().isEmpty()) {
         const ScriptLibrary::Script script = m_library ? m_library->script(request.name.trimmed())
                                                        : ScriptLibrary::Script();
@@ -990,6 +1048,9 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
         }
         code = script.code;
         name = script.name;
+        // What the requester saved itself is no more trusted than what it
+        // hands over with the request.
+        saved = script.origin == QLatin1String("user") || script.origin == QLatin1String("application");
     }
     if (code.trimmed().isEmpty()) {
         finish(scriptError(QStringLiteral("check"), QStringLiteral("there is no script to run")));
@@ -1011,12 +1072,17 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
     const QJsonObject args = request.args;
     const bool changes = checked.dynamic || !checked.changingMethods.isEmpty();
     const QByteArray hash = QCryptographicHash::hash(code.toUtf8(), QCryptographicHash::Sha1);
-    const bool needsApproval = !m_approvedThisSession.contains(hash)
-        && (m_approval == Approval::Always
-            || (m_approval == Approval::ChangingScripts && changes && !dryRun));
+    const ScriptKind kind = dryRun ? ScriptKind::DryRun
+                            : saved ? (changes ? ScriptKind::SavedChanging : ScriptKind::SavedReading)
+                                    : (changes ? ScriptKind::NewChanging : ScriptKind::NewReading);
+    const bool needsApproval = !m_approvedThisSession.contains(hash) && isApprovalRequired(kind);
+    // Unasked as a reading script means: judged harmless from its source.
+    // Held to that while it runs, where a changing one would have been asked for.
+    const bool heldToReading = !dryRun && !changes
+        && isApprovalRequired(saved ? ScriptKind::SavedChanging : ScriptKind::NewChanging);
 
     const QPointer<ScriptEngine> self(this);
-    auto start = [self, code, name, args, dryRun, finish](bool approved) {
+    auto start = [self, code, name, args, dryRun, heldToReading, finish](bool approved) {
         if (!self)
             return;
         RunOptions options;
@@ -1024,9 +1090,7 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
         options.args = args;
         options.dryRun = dryRun;
         options.external = true;
-        // Unasked under "changing scripts" means: judged harmless from its
-        // source. Held to that while it runs.
-        options.readOnlyOnly = self->m_approval == Approval::ChangingScripts && !approved && !dryRun;
+        options.readOnlyOnly = heldToReading && !approved;
         self->run(code, options, finish);
     };
 
@@ -1036,6 +1100,7 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
     }
 
     ApprovalRequest approval;
+    approval.kind = kind;
     approval.name = name;
     approval.code = code;
     approval.args = args;

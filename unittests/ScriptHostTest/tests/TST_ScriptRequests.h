@@ -14,6 +14,8 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTemporaryDir>
+#include <QTextBlock>
+#include <QTextLayout>
 #include <QTimer>
 
 class TST_ScriptRequests : public UnitTest::Test
@@ -28,6 +30,7 @@ public:
         ADD_TEST(TST_ScriptRequests::testSavedScriptByName);
         ADD_TEST(TST_ScriptRequests::testApprovalAlways);
         ADD_TEST(TST_ScriptRequests::testApprovalForChangingScripts);
+        ADD_TEST(TST_ScriptRequests::testApprovalPerKind);
         ADD_TEST(TST_ScriptRequests::testAbandonedRequest);
         ADD_TEST(TST_ScriptRequests::testApprovalDialog);
     }
@@ -214,7 +217,7 @@ private:
         Db db;
         TestSupport::registerDb(engine, db);
         engine.setApproval(Engine::Approval::Always);
-        TEST_COMPARE(int(engine.approval()), int(Engine::Approval::Always));
+        TEST_ASSERT(engine.isApprovalRequired(Engine::ScriptKind::DryRun));
 
         QList<Engine::ApprovalRequest> requests;
         Engine::ApprovalDecision answer;
@@ -337,6 +340,109 @@ private:
         TEST_COMPARE(db.archived(), 3);
     }
 
+    // Each kind of script has its own switch, and its own lock.
+    TEST_FUNCTION(testApprovalPerKind)
+    {
+        TEST_START;
+        using Kind = Engine::ScriptKind;
+
+        QTemporaryDir dir;
+        TEST_ASSERT(dir.isValid());
+        ScriptHost::ScriptLibrary library;
+        library.setDirectory(dir.path());
+        saveCountOld(library);                                      // the user's, only reads
+        ScriptHost::ScriptLibrary::Script script;
+        script.name = "Archive one";
+        script.code = "db.setStatus('o1', 'archived');\nreturn 1;";
+        script.origin = "user";
+        library.save(script);
+        script.name = "Archive two";                                // saved by the requester
+        script.code = "db.setStatus('o2', 'archived');\nreturn 1;";
+        script.origin = "assistant";
+        library.save(script);
+
+        Engine engine;
+        Db db;
+        TestSupport::registerDb(engine, db);
+        engine.setLibrary(&library);
+        QList<Kind> asked;
+        engine.setApprovalHandler([&](const Engine::ApprovalRequest& approvalRequest,
+                                      std::function<void(const Engine::ApprovalDecision&)> decide) {
+            asked << approvalRequest.kind;
+            Engine::ApprovalDecision decision;
+            decision.approved = true;
+            decide(decision);
+        });
+        auto byName = [&](const QString& name, const QJsonObject& args = QJsonObject()) {
+            Engine::Request req;
+            req.name = name;
+            req.args = args;
+            return TestSupport::request(engine, req);
+        };
+        const QString changing = "db.setStatus('o3', 'archived');\nreturn 1;";
+        const QString reading = "return db.list().length;";
+
+        // Only new changing scripts are asked for.
+        engine.setApprovalRequired(Kind::NewChanging, true);
+        TEST_COMPARE(TestSupport::request(engine, TestSupport::codeRequest(reading))["status"].toString(), QString("ok"));
+        TEST_COMPARE(byName("Count old", QJsonObject{{"minAge", 50}})["status"].toString(), QString("ok"));
+        TEST_COMPARE(byName("Archive one")["status"].toString(), QString("ok"));
+        TEST_COMPARE(TestSupport::request(engine, TestSupport::codeRequest(changing, QJsonObject(), true))["status"].toString(),
+                     QString("ok"));
+        TEST_ASSERT(asked.isEmpty());
+        TEST_COMPARE(db.archived(), 1);                             // "Archive one" ran unasked
+
+        TEST_COMPARE(TestSupport::request(engine, TestSupport::codeRequest(changing))["status"].toString(), QString("ok"));
+        TEST_COMPARE(asked, QList<Kind>{Kind::NewChanging});
+        // What the requester saved itself is as new as what it hands over.
+        TEST_COMPARE(byName("Archive two")["status"].toString(), QString("ok"));
+        TEST_COMPARE(asked, (QList<Kind>{Kind::NewChanging, Kind::NewChanging}));
+        TEST_COMPARE(db.archived(), 3);
+
+        // The other kinds, one by one.
+        asked.clear();
+        engine.setApprovalRequired(Kind::NewChanging, false);
+        engine.setApprovalRequired(Kind::SavedReading, true);
+        byName("Count old", QJsonObject{{"minAge", 50}});
+        TestSupport::request(engine, TestSupport::codeRequest(reading));
+        TEST_COMPARE(asked, QList<Kind>{Kind::SavedReading});
+
+        engine.setApprovalRequired(Kind::SavedChanging, true);
+        byName("Archive one");
+        TEST_COMPARE(asked.last(), Kind::SavedChanging);
+
+        engine.setApprovalRequired(Kind::DryRun, true);
+        TestSupport::request(engine, TestSupport::codeRequest(changing, QJsonObject(), true));
+        TEST_COMPARE(asked.last(), Kind::DryRun);
+
+        engine.setApprovalRequired(Kind::NewReading, true);
+        TestSupport::request(engine, TestSupport::codeRequest(reading));
+        TEST_COMPARE(asked.last(), Kind::NewReading);
+        TEST_COMPARE(asked.size(), 4);
+
+        // One kind locked: the user's choice, and what was stored, leave it alone.
+        engine.setApproval(Engine::Approval::Never);
+        engine.setApprovalRequired(Kind::NewChanging, true);
+        engine.setApprovalUserConfigurable(Kind::NewChanging, false);
+        TEST_ASSERT(!engine.isApprovalUserConfigurable(Kind::NewChanging));
+        TEST_ASSERT(engine.isApprovalUserConfigurable(Kind::DryRun));
+        TEST_ASSERT(!engine.setApprovalRequiredByUser(Kind::NewChanging, false));
+        TEST_ASSERT(engine.setApprovalRequiredByUser(Kind::DryRun, true));
+        const QJsonObject stored = engine.userSettings()["approval"].toObject();
+        TEST_ASSERT(!stored.contains("new_changing"));
+        TEST_COMPARE(stored["dry_run"].toBool(), true);
+        TEST_COMPARE(stored.size(), 4);
+        engine.applyUserSettings(QJsonObject{{"approval", QJsonObject{{"new_changing", false}, {"dry_run", false},
+                                                                      {"saved_reading", true}}}});
+        TEST_ASSERT(engine.isApprovalRequired(Kind::NewChanging));
+        TEST_ASSERT(!engine.isApprovalRequired(Kind::DryRun));
+        TEST_ASSERT(engine.isApprovalRequired(Kind::SavedReading));
+        // Settings stored when there were three modes still apply.
+        engine.applyUserSettings(QJsonObject{{"approval", "changing"}});
+        TEST_ASSERT(engine.isApprovalRequired(Kind::SavedChanging));
+        TEST_ASSERT(!engine.isApprovalRequired(Kind::SavedReading));
+    }
+
     // The requester gave up while the user was deciding: the run is dropped.
     TEST_FUNCTION(testAbandonedRequest)
     {
@@ -397,8 +503,11 @@ private:
 
         const QString code = "db.setStatus('o1', 'archived');\nreturn 1;";
         QString shownCode, shownUses, headline;
+        bool coloured = false;
         onApprovalDialog([&](QDialog* dialog) {
-            shownCode = dialog->findChild<QPlainTextEdit*>("scripthost_scriptApprovalCode")->toPlainText();
+            auto* codeEdit = dialog->findChild<QPlainTextEdit*>("scripthost_scriptApprovalCode");
+            shownCode = codeEdit->toPlainText();
+            coloured = !codeEdit->document()->firstBlock().layout()->formats().isEmpty();
             shownUses = dialog->findChild<QLabel*>("scripthost_scriptApprovalUses")->text();
             for (QLabel* label : dialog->findChildren<QLabel*>()) {
                 if (label->text().startsWith("Requested by"))
@@ -410,6 +519,7 @@ private:
         });
         QJsonObject result = TestSupport::request(engine, TestSupport::codeRequest(code, QJsonObject{{"x", 1}}));
         TEST_COMPARE(shownCode, code);
+        TEST_ASSERT(coloured);
         TEST_ASSERT(shownUses.contains("db.setStatus (changes)"));
         TEST_ASSERT(shownUses.contains("Arguments: {\"x\":1}"));
         TEST_COMPARE(headline, QString("Requested by the assistant: run this script?"));

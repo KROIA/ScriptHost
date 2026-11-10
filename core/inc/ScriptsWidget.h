@@ -8,7 +8,6 @@
 #include <QWidget>
 
 class QCheckBox;
-class QComboBox;
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
@@ -34,7 +33,8 @@ class ScriptLibrary;
 // scripts happens at once.
 //
 // Object names, for tests and tools that address widgets:
-//   scripthost_scriptsEnabled, scripthost_scriptsEnabledHint, scripthost_scriptsApproval,
+//   scripthost_scriptsEnabled, scripthost_scriptsEnabledHint,
+//   scripthost_scriptsAsk_<kind> (ScriptEngine::scriptKindKey),
 //   scripthost_scriptsApprovalHint, scripthost_scriptsTabs, scripthost_scriptsTable,
 //   scripthost_scriptsNoLibrary, scripthost_scriptsNew, scripthost_scriptsEdit,
 //   scripthost_scriptsDuplicate, scripthost_scriptsDelete, scripthost_scriptsOpenFolder,
@@ -100,7 +100,7 @@ private:
     QWidget*        m_content = nullptr;
     QCheckBox*      m_enabled = nullptr;
     QLabel*         m_enabledHint = nullptr;
-    QComboBox*      m_approval = nullptr;
+    QList<QCheckBox*> m_approval;       // by ScriptEngine::ScriptKind
     QLabel*         m_approvalHint = nullptr;
     QTableWidget*   m_scripts = nullptr;
     QLabel*         m_noLibrary = nullptr;
@@ -115,7 +115,7 @@ private:
     QPlainTextEdit* m_runDetails = nullptr;
 
     int                 m_pendingEnabled = -1;      // -1 none, else 0 / 1
-    int                 m_pendingApproval = -1;     // -1 none, else ScriptEngine::Approval
+    QMap<int, bool>     m_pendingApproval;          // by ScriptEngine::ScriptKind
     QMap<QString, bool> m_pendingMethods;
     bool                m_lockedVisible = true;
     bool                m_immediate = false;

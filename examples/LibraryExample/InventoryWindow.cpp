@@ -143,8 +143,9 @@ void InventoryWindow::setUpScripting()
 
     // ---- 4. Approval of requested runs ------------------------------------
     // A requested script that changes something is shown to the user first;
-    // one that only reads runs at once. The user may change the mode in the
-    // Scripts window; setApprovalUserConfigurable(false) would fix it.
+    // one that only reads runs at once. setApprovalRequired() decides per
+    // kind of script instead. The user may change it in the Scripts window;
+    // setApprovalUserConfigurable(false) would fix it.
     m_engine->setApproval(ScriptHost::ScriptEngine::Approval::ChangingScripts);
 
     // ---- 5. Saved scripts -------------------------------------------------
@@ -337,8 +338,8 @@ void InventoryWindow::runRestock(bool dryRun)
 
 // Another program asks: requestRun(). A real application would do this when
 // a message arrives from a plugin, a remote connection or an assistant. The
-// script is checked, then - it changes something, and the approval mode is
-// ChangingScripts - shown to the user, then run. `done` always gets a result,
+// script is checked, then - it changes something, and such scripts need
+// approval - shown to the user, then run. `done` always gets a result,
 // which goes back to whoever asked.
 void InventoryWindow::requestScript()
 {

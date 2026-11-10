@@ -220,7 +220,7 @@ What happens, in order:
 2. A name and no code: the script is looked up in the library, ignoring case. `there is no saved script '...'` (phase `check`) when there is none; `there is no script to run` when neither code nor name is given.
 3. Another script running: `another script is running; wait for it to finish` (phase `unavailable`). Requests are not queued.
 4. The script is checked (syntax, methods). A mistake comes back at once; the user is not bothered.
-5. Approval, where the approval mode asks for it (below). Declined: `{"status":"error","phase":"declined","message":"the user declined the script","reason":"..."}`.
+5. Approval, where the kind of script needs it (below). Declined: `{"status":"error","phase":"declined","message":"the user declined the script","reason":"..."}`.
 6. If an `abandoned` function was given, it is asked now. True: nobody waits for the result any more, and the run is dropped without one.
 7. The script runs. `done` always gets a result, except for an abandoned request.
 
@@ -232,17 +232,30 @@ The run is recorded with `external` set: `isExternalRun()` is true while it runs
 
 ### Approval
 
-Whether the user sees a requested script, and agrees, before it runs:
+Whether the user sees a requested script, and agrees, before it runs, is decided per kind of script. Every requested run is of exactly one kind:
 
-| `setApproval(...)` | |
+| `ScriptKind` | A run is of this kind when |
 |---|---|
-| `Approval::Never` (default) | Scripts run at once |
-| `Approval::ChangingScripts` | Asked for scripts that call a method that is not read-only, or that pick methods by computed names; not for a dry run. A script that runs unasked is held to that: its first call to a changing method stops it (phase `approval`) |
-| `Approval::Always` | Asked for every script |
+| `NewReading` | the code came with the request and only calls read-only methods |
+| `NewChanging` | the code came with the request and calls a method that is not read-only, or picks methods by computed names |
+| `SavedReading`, `SavedChanging` | the same two, for a script of the library run by name that the user saved or the application ships (origin `user` or `application`). A script the requester saved itself counts as new |
+| `DryRun` | it is a dry run, of whatever script: nothing is changed |
+
+`setApprovalRequired(kind, bool)` switches one kind; by default none needs approval. `setApproval(...)` sets all of them at once:
+
+| `setApproval(...)` | Needs approval |
+|---|---|
+| `Approval::Never` | no kind |
+| `Approval::ChangingScripts` | `NewChanging` and `SavedChanging` |
+| `Approval::Always` | every kind |
+
+A script that runs unasked as a reading one is held to that while changing scripts of the same origin need approval: its first call to a changing method stops it (phase `approval`).
+
+The user decides the same in the Scripts window, with one check box per kind under "Ask before running". `setApprovalUserConfigurable(kind, false)` takes one kind out of the user's hands, `setApprovalUserConfigurable(false)` all of them.
 
 The built-in dialog shows who asks, the code, the arguments and the methods the script uses, marked as reading or changing. The user can run it, test-run it (a dry run, with the result shown in the dialog) or decline with a reason that goes back to the requester. "Do not ask again for this script in this session" remembers the exact code. `setDialogParent(widget)` sets the window it opens over.
 
-`setApprovalHandler(handler)` replaces the dialog with the application's own. The handler gets an `ApprovalRequest` (code, name, arguments, methods, changing methods, whether the script may call more than its source shows) and may call `decide` later, from a window of its own.
+`setApprovalHandler(handler)` replaces the dialog with the application's own. The handler gets an `ApprovalRequest` (kind, code, name, arguments, methods, changing methods, whether the script may call more than its source shows) and may call `decide` later, from a window of its own.
 
 Approval applies to `requestRun()` only. `run()` never asks.
 
@@ -273,7 +286,7 @@ for (const id of db.listObjects()) { ... }
 | What | By code | Locked against the user |
 |---|---|---|
 | Requested runs | `setEnabled(bool)` | `setEnabledUserConfigurable(false)` |
-| Approval mode | `setApproval(mode)` | `setApprovalUserConfigurable(false)` |
+| What needs approval | `setApprovalRequired(kind, bool)`, `setApproval(preset)` | `setApprovalUserConfigurable(kind, false)`, or `(false)` for every kind |
 | Each method | `setMethodEnabled`, `setMethodGroupEnabled` | `setMethodUserConfigurable`, `setMethodGroupUserConfigurable` |
 | Editing saved scripts in the Scripts window | `setUserMayEditScripts(bool)` | |
 | Runner and debugger in the editor | `setDebuggerEnabled(bool)` | |
@@ -292,7 +305,7 @@ settings.setValue("scripting", QJsonDocument(engine->userSettings()).toJson(QJso
 
 `ScriptHost::ScriptsWidget` is a plain widget, for a settings dialog or a window of its own. `setScripting(engine)` connects it. Changes wait for `apply()` unless `setApplyImmediately(true)`; `changed()` is emitted when the user changed something, which is the moment to store `userSettings()`.
 
-- **Switches**: "Allow (requester) to run scripts" and "Ask before running".
+- **Switches**: "Allow (requester) to run scripts" and, under "Ask before running", one check box per kind of script.
 - **Scripts**: the saved scripts. New, Edit, Duplicate, Delete, Open folder.
 - **Methods**: every method with a check box; locked ones are greyed out.
 - **Runs**: the scripts run in this session, with who started them, code, arguments, result and log.

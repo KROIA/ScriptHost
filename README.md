@@ -37,7 +37,7 @@ engine->run("return db.readObject('a1').name;", {}, [](const QJsonObject& result
 - **Checked before running**: syntax errors and calls of methods that do not exist come back with the line and a "did you mean", before anything is executed.
 - **Limits**: run time, total method calls, calls per method (`setMaxCallsPerRun`), log lines.
 - **Dry run**: read-only methods run, changing ones are only recorded.
-- **Requested runs** (`requestRun`) for other programs: a master switch, a requester name the user sees, approval by the user for every script or only for scripts that change something, with a built-in dialog (run, test run, decline with a reason) or the application's own handler.
+- **Requested runs** (`requestRun`) for other programs: a master switch, a requester name the user sees, approval by the user per kind of script (new or saved, reading or changing, dry run), with a built-in dialog (run, test run, decline with a reason) or the application's own handler.
 - **Saved scripts** in `.js` files with a small header; shipped read-only folders next to the user's folder.
 - **Per-method switches** and locks: what scripts may call, and what the user may change. The user's choices as JSON for the application to store.
 - **Widgets**: `ScriptsWidget` (switches, saved scripts, methods, runs of the session) and `ScriptEditorDialog` (editor with method reference, check, run, dry run, and a debugger that steps from method call to method call).

@@ -118,20 +118,45 @@ public:
     Limits limits() const { return m_limits; }
 
     // ---- Approval of requested runs ----------------------------------------
-    // Whether the user sees a requested script, and agrees, before it runs.
-    //   Never            runs at once (default)
-    //   ChangingScripts  asked for scripts that call a method that is not
-    //                    read-only. A script that runs unasked cannot call one.
-    //   Always           asked for every script
+    // Whether the user sees a requested script, and agrees, before it runs -
+    // decided per kind of script. Every requested run is of exactly one kind:
+    enum class ScriptKind
+    {
+        NewReading,     // code that came with the request and only calls
+                        // read-only methods
+        NewChanging,    // code that came with the request and calls a method
+                        // that is not read-only, or picks methods by computed
+                        // names
+        SavedReading,   // a script of the library, run by name, that the user
+        SavedChanging,  // saved or the application ships (origin "user" or
+                        // "application"). One the requester saved is new.
+        DryRun          // any script as a dry run: nothing is changed
+    };
+    enum { ScriptKindCount = 5 };
+    // The kind's name in userSettings(): "new_reading", "new_changing",
+    // "saved_reading", "saved_changing", "dry_run".
+    static QString scriptKindKey(ScriptKind kind);
+
+    // Default: no kind needs approval. A script that runs unasked as a
+    // reading one cannot call a changing method while changing scripts of
+    // the same origin need approval.
+    void setApprovalRequired(ScriptKind kind, bool required);
+    bool isApprovalRequired(ScriptKind kind) const;
+    void setApprovalUserConfigurable(ScriptKind kind, bool configurable);
+    void setApprovalUserConfigurable(bool configurable);    // every kind
+    bool isApprovalUserConfigurable(ScriptKind kind) const;
+    bool setApprovalRequiredByUser(ScriptKind kind, bool required);
+
+    // Every kind at once:
+    //   Never            nothing needs approval
+    //   ChangingScripts  NewChanging and SavedChanging do
+    //   Always           every kind does
     enum class Approval { Never, ChangingScripts, Always };
     void setApproval(Approval approval);
-    Approval approval() const { return m_approval; }
-    void setApprovalUserConfigurable(bool configurable);
-    bool isApprovalUserConfigurable() const { return m_approvalUserConfigurable; }
-    bool setApprovalByUser(Approval approval);
 
     struct ApprovalRequest
     {
+        ScriptKind  kind = ScriptKind::NewChanging;
         QString     name;               // of a saved script, else empty
         QString     code;
         QJsonObject args;
@@ -155,8 +180,8 @@ public:
     void setDialogParent(QWidget* parent);
 
     // ---- The user's choices, for the application to store ------------------
-    // {"enabled": bool, "approval": "never"|"changing"|"always",
-    //  "methods": {"<name>": bool}} - only what the user may change.
+    // {"enabled": bool, "approval": {"<kind>": bool}, "methods": {"<name>": bool}}
+    // - only what the user may change. Kinds as in scriptKindKey().
     QJsonObject userSettings() const;
     // Applies what is not locked; the rest is ignored.
     void applyUserSettings(const QJsonObject& settings);
@@ -211,8 +236,8 @@ public:
     };
     // A run somebody else asks for. The script is checked first (a mistake
     // comes back as {"status":"error","phase":"syntax"|"check",...} and the
-    // user is not bothered), approved by the user where the approval mode
-    // says so ({"phase":"declined","reason":...} when not), then run. `done`
+    // user is not bothered), approved by the user where its kind needs that
+    // ({"phase":"declined","reason":...} when not), then run. `done`
     // always gets a result. `abandoned`, if given, is asked once the user has
     // decided: true means nobody is waiting for this run any more, and it is
     // dropped without a result.
@@ -255,7 +280,7 @@ signals:
     void enabledChanged(bool enabled);
     // A method was added, removed, switched or (un)locked.
     void methodsChanged();
-    // Approval mode, the library or one of the locks changed.
+    // What needs approval, the library or one of the locks changed.
     void settingsChanged();
 
     void runStarted(const QString& name, bool external);
@@ -293,8 +318,8 @@ private:
     bool        m_enabled = true;
     bool        m_enabledUserConfigurable = true;
     QString     m_requesterName;
-    Approval    m_approval = Approval::Never;
-    bool        m_approvalUserConfigurable = true;
+    bool        m_approvalRequired[ScriptKindCount] = {};
+    bool        m_approvalConfigurable[ScriptKindCount] = {true, true, true, true, true};
     ApprovalHandler   m_approvalHandler;
     QPointer<QWidget> m_dialogParent;
     QSet<QByteArray>  m_approvedThisSession;    // hashes of approved code

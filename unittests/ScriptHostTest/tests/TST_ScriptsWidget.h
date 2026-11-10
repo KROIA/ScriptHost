@@ -68,7 +68,7 @@ private:
         // Nothing bound: nothing to switch.
         ScriptHost::ScriptsWidget widget;
         auto* enabled = widget.findChild<QCheckBox*>("scripthost_scriptsEnabled");
-        auto* approval = widget.findChild<QComboBox*>("scripthost_scriptsApproval");
+        auto* approval = widget.findChild<QCheckBox*>("scripthost_scriptsAsk_new_changing");
         TEST_ASSERT(enabled && approval);
         if (!enabled || !approval)
             return;
@@ -78,7 +78,7 @@ private:
         TEST_ASSERT(widget.scripting() == &engine);
         TEST_ASSERT(enabled->isEnabled());
         TEST_ASSERT(enabled->isChecked());
-        TEST_COMPARE(approval->currentData().toInt(), int(Engine::Approval::Never));
+        TEST_ASSERT(!approval->isChecked());
         // Who asks for runs is the application's to say.
         TEST_COMPARE(enabled->text(), QString("Allow another program to run scripts"));
         engine.setRequesterName("the assistant");
@@ -88,15 +88,15 @@ private:
 
         // Pending until apply().
         enabled->click();
-        approval->setCurrentIndex(approval->findData(int(Engine::Approval::Always)));
+        approval->click();
         TEST_COMPARE(changes, 2);
         TEST_ASSERT(engine.isEnabled());
-        TEST_COMPARE(int(engine.approval()), int(Engine::Approval::Never));
+        TEST_ASSERT(!engine.isApprovalRequired(Engine::ScriptKind::NewChanging));
         widget.refresh();                                   // pending choices survive a refresh
         TEST_ASSERT(!enabled->isChecked());
         widget.apply();
         TEST_ASSERT(!engine.isEnabled());
-        TEST_COMPARE(int(engine.approval()), int(Engine::Approval::Always));
+        TEST_ASSERT(engine.isApprovalRequired(Engine::ScriptKind::NewChanging));
 
         // Dropped by revert().
         enabled->click();
@@ -108,8 +108,8 @@ private:
         // The application changes it: the widget follows.
         engine.setEnabled(true);
         TEST_ASSERT(enabled->isChecked());
-        engine.setApproval(Engine::Approval::ChangingScripts);
-        TEST_COMPARE(approval->currentData().toInt(), int(Engine::Approval::ChangingScripts));
+        engine.setApproval(Engine::Approval::Never);
+        TEST_ASSERT(!approval->isChecked());
 
         // At once, for a settings page without an Apply button.
         widget.setApplyImmediately(true);
@@ -134,12 +134,12 @@ private:
         ScriptHost::ScriptsWidget widget;
         widget.setScripting(&engine);
         auto* enabled = widget.findChild<QCheckBox*>("scripthost_scriptsEnabled");
-        auto* approval = widget.findChild<QComboBox*>("scripthost_scriptsApproval");
+        auto* approval = widget.findChild<QCheckBox*>("scripthost_scriptsAsk_new_changing");
         TEST_ASSERT(!enabled->isEnabled());
         TEST_ASSERT(!widget.findChild<QLabel*>("scripthost_scriptsEnabledHint")->isHidden());
         TEST_ASSERT(!approval->isEnabled());
         TEST_ASSERT(!widget.findChild<QLabel*>("scripthost_scriptsApprovalHint")->isHidden());
-        TEST_COMPARE(approval->currentData().toInt(), int(Engine::Approval::Always));
+        TEST_ASSERT(approval->isChecked());
         auto* locked = widget.findChild<QCheckBox*>("scripthost_scriptsMethod_db.setStatus");
         TEST_ASSERT(locked && !locked->isEnabled() && !locked->isChecked());
         if (!locked)
@@ -147,11 +147,11 @@ private:
 
         // Even switched behind the disabled controls' back, nothing changes.
         enabled->setChecked(false);
-        approval->setCurrentIndex(approval->findData(int(Engine::Approval::Never)));
+        approval->setChecked(false);
         locked->setChecked(true);
         widget.apply();
         TEST_ASSERT(engine.isEnabled());
-        TEST_COMPARE(int(engine.approval()), int(Engine::Approval::Always));
+        TEST_ASSERT(engine.isApprovalRequired(Engine::ScriptKind::NewChanging));
         TEST_ASSERT(!engine.isMethodEnabled("db.setStatus"));
         TEST_ASSERT(enabled->isChecked());                  // shows the real state again
 
