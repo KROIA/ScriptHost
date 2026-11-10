@@ -384,7 +384,7 @@ void ScriptsWidget::refreshMethods()
     if (m_applying)
         return;
 
-    // Deleted synchronously, as in ToolSettingsWidget: deleteLater() posted
+    // Deleted synchronously: deleteLater() posted
     // before a modal dialog's exec() would wait until the dialog closes.
     while (m_methodsLayout->count() > 1) {
         QLayoutItem* item = m_methodsLayout->takeAt(0);
@@ -462,7 +462,7 @@ void ScriptsWidget::refreshRuns()
         const QStringList cells = {
             record.started.toString(QStringLiteral("HH:mm:ss")),
             record.name.isEmpty() ? tr("(unsaved)") : record.name,
-            record.external ? m_scripting->requesterName() : tr("user"),
+            record.external ? m_scripting->requesterName() : tr("the user"),
             record.dryRun ? tr("yes") : QString(),
             phase.isEmpty() ? status : QStringLiteral("%1 (%2)").arg(status, phase),
             duration.isUndefined() ? QString() : tr("%1 ms").arg(duration.toInt())
@@ -497,9 +497,9 @@ void ScriptsWidget::showRunDetails()
             lines << (line.isString() ? line.toString() : prettyJson(line));
         QString text;
         text += tr("Script: %1\n").arg(record.name.isEmpty() ? tr("(unsaved)") : record.name);
-        text += tr("Started: %1 by the %2%3\n\n")
+        text += tr("Started: %1 by %2%3\n\n")
                     .arg(record.started.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
-                         record.external ? m_scripting->requesterName() : tr("user"),
+                         record.external ? m_scripting->requesterName() : tr("the user"),
                          record.dryRun ? tr(", dry run") : QString());
         text += tr("Arguments:\n%1\n\n").arg(prettyJson(record.args));
         text += tr("Code:\n%1\n\n").arg(record.code);

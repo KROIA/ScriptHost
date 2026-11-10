@@ -22,12 +22,12 @@ class ScriptEngine;
 class ScriptLibrary;
 
 // Where the user of an application sees and steers scripting: may the
-// assistant run scripts, must it ask first, which methods may scripts call,
+// program run scripts, must it ask first, which methods may scripts call,
 // the saved scripts (with the editor) and the runs of this session. The
-// Settings dialog's "Scripts" tab is one of these; an application with a
+// "Scripts" tab of a settings dialog can be one of these; an application with a
 // settings window of its own embeds another.
 //
-// Like ToolSettingsWidget the switches (enabled, approval, methods) are
+// The switches (enabled, approval, methods) are
 // pending until apply() unless setApplyImmediately(true); what the
 // application locked is shown disabled with a hint, locked methods greyed
 // or - with setLockedVisible(false) - not at all. Saving and deleting

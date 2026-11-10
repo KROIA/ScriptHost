@@ -1,34 +1,21 @@
-#ifdef QT_ENABLED
+#include "InventoryWindow.h"
 #include <QApplication>
-#endif
-#include <iostream>
-#include "ScriptHost.h"
-
-#ifdef QT_WIDGETS_ENABLED
-#include <QWidget>
-#endif
 
 int main(int argc, char* argv[])
 {
-#ifdef QT_WIDGETS_ENABLED
-	QGuiApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
-	QGuiApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
-	QGuiApplication::setHighDpiScaleFactorRoundingPolicy(Qt::HighDpiScaleFactorRoundingPolicy::PassThrough);
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    // Qt 6 scales for high-DPI screens by default.
+    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 #endif
-#ifdef QT_ENABLED
-	QApplication app(argc, argv);
-#endif
-	ScriptHost::Profiler::start();
-	ScriptHost::LibraryInfo::printInfo();
-#ifdef QT_WIDGETS_ENABLED
-	QWidget* widget = ScriptHost::LibraryInfo::createInfoWidget();
-	if (widget)
-		widget->show();
-#endif
-	int ret = 0;
-#ifdef QT_ENABLED
-	ret = app.exec();
-#endif
-	ScriptHost::Profiler::stop((std::string(ScriptHost::LibraryInfo::name) + ".prof").c_str());
-	return ret;
+    QApplication app(argc, argv);
+    // QSettings and QStandardPaths::AppDataLocation are named after these:
+    // the user's scripts and settings end up in their own folder.
+    QApplication::setOrganizationName("ScriptHost");
+    QApplication::setApplicationName("ScriptHostExample");
+
+    ScriptHost::LibraryInfo::printInfo();
+
+    InventoryWindow window;
+    window.show();
+    return app.exec();
 }

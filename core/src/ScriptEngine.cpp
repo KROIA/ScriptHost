@@ -836,7 +836,10 @@ void ScriptEngine::askApproval(const ApprovalRequest& request,
         : QStringLiteral("Requested by %1: run the saved script \"%2\"?").arg(m_requesterName, request.name);
     if (request.dryRun)
         headline += QStringLiteral(" It is a dry run: nothing will be changed.");
-    layout->addWidget(new QLabel(headline, &dialog));
+    auto* headlineLabel = new QLabel(headline, &dialog);
+    headlineLabel->setObjectName(QStringLiteral("scripthost_scriptApprovalHeadline"));
+    headlineLabel->setWordWrap(true);
+    layout->addWidget(headlineLabel);
 
     auto* code = new QPlainTextEdit(&dialog);
     code->setObjectName(QStringLiteral("scripthost_scriptApprovalCode"));
@@ -914,9 +917,17 @@ void ScriptEngine::askApproval(const ApprovalRequest& request,
     decision.approved = dialog.exec() == QDialog::Accepted;
     decision.reason = reason->text().trimmed();
     decision.rememberForSession = decision.approved && remember->isChecked();
-    // A test run still going when the dialog closes must not block the real one.
-    if (isRunning())
+    // A test run still going when the dialog closes must not block the real
+    // one: it is stopped, and the decision takes effect once it has ended.
+    if (isRunning()) {
         stop();
+        auto* once = new QObject(this);
+        connect(this, &ScriptEngine::runFinished, once, [once, decide, decision]() {
+            once->deleteLater();
+            decide(decision);
+        });
+        return;
+    }
     decide(decision);
 }
 

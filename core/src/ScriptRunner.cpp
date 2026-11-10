@@ -162,7 +162,7 @@ void ScriptRunner::run()
             result["would_call"] = would;
         }
         if (!m_log.isEmpty()) {
-            // The model gets the end of the log; all of it went to the application.
+            // The result carries the end of the log; all of it was signalled.
             QJsonArray tail;
             for (int i = qMax(0, m_log.size() - 20); i < m_log.size(); ++i)
                 tail.append(m_log[i].left(300));

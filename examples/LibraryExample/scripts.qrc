@@ -1,0 +1,8 @@
+<RCC>
+    <!-- The scripts that ship with the example. Compiled into the executable,
+         so ":/scripts" is a folder nobody can write to. -->
+    <qresource prefix="/">
+        <file>scripts/restock-low-items.js</file>
+        <file>scripts/inventory-report.js</file>
+    </qresource>
+</RCC>

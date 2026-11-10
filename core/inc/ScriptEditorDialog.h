@@ -26,7 +26,7 @@ class ScriptCodeEdit;
 // arguments, the output, and a reference of the methods a script may call.
 // The Scripts tab (ScriptsWidget) opens it; an application may as well.
 //
-// It reacts only to the runs it started itself: the assistant may run a
+// It reacts only to the runs it started itself: another program may run a
 // script while the window is open, and then the Run buttons just wait.
 // Closing the window stops its run.
 //

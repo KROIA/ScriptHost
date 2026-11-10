@@ -6,6 +6,12 @@
 
 ## USER_SECTION_START 1
 
+## Every test class is a header included by main.cpp, so that one object
+## file outgrows the default section limit of the MSVC object format.
+if(MSVC)
+    add_compile_options(/bigobj)
+endif()
+
 ## USER_SECTION_END
 
 ## Override the QT_MODULES if you want to use other modules. 
