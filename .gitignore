@@ -1,0 +1,51 @@
+# Prerequisites
+*.d
+*.user
+*.vs
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+#*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+#*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+
+# Paths
+bin
+build
+Sandbox/bin
+Unittests/bin
+doxygen
+out
+include
+lib
+graphify-out
+.claude
+
+# Claude Code — per-machine settings, not shared.
+# Permission grants are a per-developer trust decision; each clone makes its own.
+.claude/settings.local.json
