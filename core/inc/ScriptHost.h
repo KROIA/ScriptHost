@@ -14,4 +14,10 @@
 
 /// USER_SECTION_START 2
 
+#include "ScriptMethod.h"
+#include "ScriptEngine.h"
+#include "ScriptLibrary.h"
+#include "ScriptsWidget.h"
+#include "ScriptEditorDialog.h"
+
 /// USER_SECTION_END

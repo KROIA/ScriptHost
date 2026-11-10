@@ -1,0 +1,599 @@
+#include "ScriptsWidget.h"
+#include "ScriptEditorDialog.h"
+#include "ScriptLibrary.h"
+#include "ScriptMethod.h"
+#include "ScriptEngine.h"
+
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFontDatabase>
+#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QLabel>
+#include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QSignalBlocker>
+#include <QSplitter>
+#include <QTabWidget>
+#include <QTableWidget>
+#include <QUrl>
+#include <QVBoxLayout>
+#include <map>
+
+namespace ScriptHost
+{
+
+namespace
+{
+
+QString prettyJson(const QJsonValue& value)
+{
+    if (value.isObject())
+        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Indented)).trimmed();
+    if (value.isArray())
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Indented)).trimmed();
+    const QString text = QString::fromUtf8(QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact));
+    return text.mid(1, text.size() - 2);
+}
+
+QTableWidget* makeTable(const QStringList& headers, const char* objectName, int stretchColumn, QWidget* parent)
+{
+    auto* table = new QTableWidget(0, int(headers.size()), parent);
+    table->setObjectName(QString::fromLatin1(objectName));
+    table->setHorizontalHeaderLabels(headers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->setSelectionMode(QAbstractItemView::SingleSelection);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setWordWrap(false);
+    table->verticalHeader()->setVisible(false);
+    QHeaderView* header = table->horizontalHeader();
+    header->setStretchLastSection(false);
+    header->setSectionResizeMode(QHeaderView::ResizeToContents);
+    header->setSectionResizeMode(stretchColumn, QHeaderView::Stretch);
+    return table;
+}
+
+QLabel* hintLabel(const char* objectName, QWidget* parent)
+{
+    auto* label = new QLabel(ScriptsWidget::tr("Set by the application."), parent);
+    label->setObjectName(QString::fromLatin1(objectName));
+    label->setStyleSheet(QStringLiteral("color: #888;"));
+    return label;
+}
+
+} // namespace
+
+ScriptsWidget::ScriptsWidget(QWidget* parent)
+    : QWidget(parent)
+{
+    auto* outer = new QVBoxLayout(this);
+    m_noScripting = new QLabel(tr("No scripting bound - call setScripting() to manage scripts here."), this);
+    m_noScripting->setWordWrap(true);
+    m_noScripting->setStyleSheet(QStringLiteral("color: #888;"));
+    outer->addWidget(m_noScripting);
+
+    m_content = new QWidget(this);
+    auto* layout = new QVBoxLayout(m_content);
+    layout->setContentsMargins(0, 0, 0, 0);
+    outer->addWidget(m_content, 1);
+
+    // ---- switches
+    auto* form = new QFormLayout();
+    auto* enabledRow = new QHBoxLayout();
+    m_enabled = new QCheckBox(tr("Allow requested scripts"), m_content);
+    m_enabled->setObjectName(QStringLiteral("scripthost_scriptsEnabled"));
+    m_enabledHint = hintLabel("scripthost_scriptsEnabledHint", m_content);
+    enabledRow->addWidget(m_enabled);
+    enabledRow->addWidget(m_enabledHint);
+    enabledRow->addStretch();
+    form->addRow(enabledRow);
+
+    auto* approvalRow = new QHBoxLayout();
+    m_approval = new QComboBox(m_content);
+    m_approval->setObjectName(QStringLiteral("scripthost_scriptsApproval"));
+    m_approval->addItem(tr("Never"), int(ScriptEngine::Approval::Never));
+    m_approval->addItem(tr("Scripts that change something"), int(ScriptEngine::Approval::ChangingScripts));
+    m_approval->addItem(tr("Always"), int(ScriptEngine::Approval::Always));
+    m_approvalHint = hintLabel("scripthost_scriptsApprovalHint", m_content);
+    approvalRow->addWidget(m_approval);
+    approvalRow->addWidget(m_approvalHint);
+    approvalRow->addStretch();
+    form->addRow(tr("Ask before running:"), approvalRow);
+    layout->addLayout(form);
+
+    connect(m_enabled, &QCheckBox::toggled, this, [this](bool on) {
+        m_pendingEnabled = on ? 1 : 0;
+        userChanged();
+    });
+    connect(m_approval, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        m_pendingApproval = m_approval->currentData().toInt();
+        userChanged();
+    });
+
+    auto* tabs = new QTabWidget(m_content);
+    tabs->setObjectName(QStringLiteral("scripthost_scriptsTabs"));
+    layout->addWidget(tabs, 1);
+
+    // ---- saved scripts
+    auto* scriptsPage = new QWidget(tabs);
+    auto* scriptsLayout = new QVBoxLayout(scriptsPage);
+    m_noLibrary = new QLabel(tr("The application keeps no saved scripts (no script library is set)."), scriptsPage);
+    m_noLibrary->setObjectName(QStringLiteral("scripthost_scriptsNoLibrary"));
+    m_noLibrary->setWordWrap(true);
+    m_noLibrary->setStyleSheet(QStringLiteral("color: #888;"));
+    scriptsLayout->addWidget(m_noLibrary);
+    m_scripts = makeTable({tr("Name"), tr("Description"), tr("Origin")}, "scripthost_scriptsTable", 1, scriptsPage);
+    scriptsLayout->addWidget(m_scripts, 1);
+    auto* scriptButtons = new QHBoxLayout();
+    auto button = [scriptsPage, scriptButtons](const QString& text, const char* name) {
+        auto* b = new QPushButton(text, scriptsPage);
+        b->setObjectName(QString::fromLatin1(name));
+        scriptButtons->addWidget(b);
+        return b;
+    };
+    m_new = button(tr("New"), "scripthost_scriptsNew");
+    m_edit = button(tr("Edit"), "scripthost_scriptsEdit");
+    m_duplicate = button(tr("Duplicate"), "scripthost_scriptsDuplicate");
+    m_delete = button(tr("Delete"), "scripthost_scriptsDelete");
+    scriptButtons->addStretch();
+    m_openFolder = button(tr("Open folder"), "scripthost_scriptsOpenFolder");
+    scriptsLayout->addLayout(scriptButtons);
+    tabs->addTab(scriptsPage, tr("Scripts"));
+
+    connect(m_scripts, &QTableWidget::itemSelectionChanged, this, &ScriptsWidget::updateScriptButtons);
+    connect(m_scripts, &QTableWidget::cellDoubleClicked, this, [this]() { editScript(selectedScript()); });
+    connect(m_new, &QPushButton::clicked, this, &ScriptsWidget::newScript);
+    connect(m_edit, &QPushButton::clicked, this, [this]() { editScript(selectedScript()); });
+    connect(m_duplicate, &QPushButton::clicked, this, [this]() { duplicateScript(selectedScript()); });
+    connect(m_delete, &QPushButton::clicked, this, [this]() { deleteScript(selectedScript()); });
+    connect(m_openFolder, &QPushButton::clicked, this, &ScriptsWidget::openFolder);
+
+    // ---- methods
+    auto* scroll = new QScrollArea(tabs);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    m_methodsPage = new QWidget(scroll);
+    m_methodsLayout = new QVBoxLayout(m_methodsPage);
+    m_methodsLayout->setSpacing(4);
+    m_methodsLayout->addStretch();
+    scroll->setWidget(m_methodsPage);
+    tabs->addTab(scroll, tr("Methods"));
+
+    // ---- runs of this session
+    auto* runsPage = new QWidget(tabs);
+    auto* runsLayout = new QVBoxLayout(runsPage);
+    auto* split = new QSplitter(Qt::Vertical, runsPage);
+    split->setChildrenCollapsible(false);
+    m_runs = makeTable({tr("Time"), tr("Script"), tr("By"), tr("Dry run"), tr("Status"), tr("Duration")},
+                       "scripthost_scriptsRuns", 1, split);
+    m_runDetails = new QPlainTextEdit(split);
+    m_runDetails->setObjectName(QStringLiteral("scripthost_scriptsRunDetails"));
+    m_runDetails->setReadOnly(true);
+    m_runDetails->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_runDetails->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    split->addWidget(m_runs);
+    split->addWidget(m_runDetails);
+    runsLayout->addWidget(split, 1);
+    auto* runsButtons = new QHBoxLayout();
+    runsButtons->addStretch();
+    auto* clear = new QPushButton(tr("Clear"), runsPage);
+    clear->setObjectName(QStringLiteral("scripthost_scriptsRunsClear"));
+    runsButtons->addWidget(clear);
+    runsLayout->addLayout(runsButtons);
+    tabs->addTab(runsPage, tr("Runs"));
+
+    connect(m_runs, &QTableWidget::itemSelectionChanged, this, [this]() {
+        const QList<QTableWidgetItem*> selected = m_runs->selectedItems();
+        m_selectedRun = selected.isEmpty() ? QDateTime() : selected.first()->data(Qt::UserRole).toDateTime();
+        showRunDetails();
+    });
+    connect(clear, &QPushButton::clicked, this, [this]() {
+        if (m_scripting)
+            m_scripting->clearRuns();
+    });
+
+    refresh();
+}
+
+ScriptsWidget::~ScriptsWidget() = default;
+
+void ScriptsWidget::setScripting(ScriptEngine* scripting)
+{
+    if (m_scripting)
+        m_scripting->disconnect(this);
+    m_scripting = scripting;
+    m_pendingEnabled = -1;
+    m_pendingApproval = -1;
+    m_pendingMethods.clear();
+    if (m_scripting) {
+        connect(m_scripting, &ScriptEngine::enabledChanged, this, &ScriptsWidget::refreshSwitches);
+        connect(m_scripting, &ScriptEngine::settingsChanged, this, [this]() {
+            refreshSwitches();
+            refreshScripts();
+        });
+        connect(m_scripting, &ScriptEngine::methodsChanged, this, &ScriptsWidget::refreshMethods);
+        connect(m_scripting, &ScriptEngine::runsChanged, this, &ScriptsWidget::refreshRuns);
+    }
+    refresh();
+}
+
+ScriptEngine* ScriptsWidget::scripting() const
+{
+    return m_scripting;
+}
+
+void ScriptsWidget::setLockedVisible(bool visible)
+{
+    m_lockedVisible = visible;
+    refreshMethods();
+}
+
+void ScriptsWidget::setApplyImmediately(bool immediately)
+{
+    m_immediate = immediately;
+    if (m_immediate)
+        apply();
+}
+
+void ScriptsWidget::userChanged()
+{
+    emit changed();
+    if (m_immediate)
+        apply();
+}
+
+void ScriptsWidget::apply()
+{
+    if (!m_scripting)
+        return;
+    // Every change on the ScriptEngine object asks for a refresh; the method
+    // list is not rebuilt under the check box that is being clicked.
+    m_applying = true;
+    if (m_pendingEnabled >= 0)
+        m_scripting->setEnabledByUser(m_pendingEnabled == 1);
+    if (m_pendingApproval >= 0)
+        m_scripting->setApprovalByUser(static_cast<ScriptEngine::Approval>(m_pendingApproval));
+    const QMap<QString, bool> pending = m_pendingMethods;
+    m_pendingEnabled = -1;
+    m_pendingApproval = -1;
+    m_pendingMethods.clear();
+    for (auto it = pending.constBegin(); it != pending.constEnd(); ++it)
+        m_scripting->setMethodEnabledByUser(it.key(), it.value());
+    m_applying = false;
+    refreshSwitches();
+}
+
+void ScriptsWidget::revert()
+{
+    m_pendingEnabled = -1;
+    m_pendingApproval = -1;
+    m_pendingMethods.clear();
+    refreshSwitches();
+    refreshMethods();
+}
+
+void ScriptsWidget::refresh()
+{
+    m_noScripting->setVisible(!m_scripting);
+    m_content->setEnabled(m_scripting != nullptr);
+    refreshSwitches();
+    refreshScripts();
+    refreshMethods();
+    refreshRuns();
+}
+
+void ScriptsWidget::refreshSwitches()
+{
+    const QSignalBlocker blockEnabled(m_enabled);
+    const QSignalBlocker blockApproval(m_approval);
+    if (!m_scripting) {
+        m_enabledHint->hide();
+        m_approvalHint->hide();
+        return;
+    }
+    // Who asks is the application's to say: "the assistant", "the plugin".
+    m_enabled->setText(tr("Allow %1 to run scripts").arg(m_scripting->requesterName()));
+    const bool enabledLocked = !m_scripting->isEnabledUserConfigurable();
+    const bool approvalLocked = !m_scripting->isApprovalUserConfigurable();
+    m_enabled->setChecked(!enabledLocked && m_pendingEnabled >= 0 ? m_pendingEnabled == 1
+                                                                  : m_scripting->isEnabled());
+    m_enabled->setEnabled(!enabledLocked);
+    m_enabledHint->setVisible(enabledLocked);
+    const int approval = !approvalLocked && m_pendingApproval >= 0 ? m_pendingApproval
+                                                                    : int(m_scripting->approval());
+    m_approval->setCurrentIndex(m_approval->findData(approval));
+    m_approval->setEnabled(!approvalLocked);
+    m_approvalHint->setVisible(approvalLocked);
+}
+
+void ScriptsWidget::refreshScripts()
+{
+    ScriptLibrary* library = m_scripting ? m_scripting->library() : nullptr;
+    if (library != m_library) {
+        if (m_library)
+            m_library->disconnect(this);
+        m_library = library;
+        if (m_library)
+            connect(m_library, &ScriptLibrary::changed, this, &ScriptsWidget::refreshScripts);
+    }
+
+    const QString selected = selectedScript();
+    const QSignalBlocker blocker(m_scripts);
+    m_scripts->setRowCount(0);
+    m_noLibrary->setVisible(m_scripting && !library);
+    m_scripts->setVisible(library != nullptr || !m_scripting);
+    if (library) {
+        for (const ScriptLibrary::Script& entry : library->scripts()) {
+            const int row = m_scripts->rowCount();
+            m_scripts->insertRow(row);
+            auto* name = new QTableWidgetItem(entry.name);
+            name->setData(Qt::UserRole, entry.name);
+            name->setToolTip(entry.filePath);
+            m_scripts->setItem(row, 0, name);
+            auto* description = new QTableWidgetItem(entry.description.simplified());
+            description->setToolTip(entry.description);
+            m_scripts->setItem(row, 1, description);
+            m_scripts->setItem(row, 2, new QTableWidgetItem(entry.readOnly ? tr("%1 (read-only)").arg(entry.origin)
+                                                                           : entry.origin));
+            if (entry.readOnly) {
+                for (int column = 0; column < 3; ++column)
+                    m_scripts->item(row, column)->setForeground(QColor(0x88, 0x88, 0x88));
+            }
+            if (entry.name == selected)
+                m_scripts->selectRow(row);
+        }
+    }
+    updateScriptButtons();
+}
+
+void ScriptsWidget::updateScriptButtons()
+{
+    ScriptLibrary* library = m_scripting ? m_scripting->library() : nullptr;
+    const bool mayEdit = library && m_scripting->userMayEditScripts();
+    const bool writable = library && !library->directory().isEmpty();
+    const QString name = selectedScript();
+    const bool readOnly = !name.isEmpty() && library && library->script(name).readOnly;
+    m_new->setEnabled(mayEdit && writable);
+    m_edit->setEnabled(!name.isEmpty());
+    m_edit->setText(mayEdit && !readOnly ? tr("Edit") : tr("View"));
+    m_duplicate->setEnabled(mayEdit && writable && !name.isEmpty());
+    m_delete->setEnabled(mayEdit && !name.isEmpty() && !readOnly);
+    m_openFolder->setEnabled(writable);
+    for (QPushButton* b : {m_new, m_edit, m_duplicate, m_delete, m_openFolder})
+        b->setVisible(library != nullptr);
+}
+
+QString ScriptsWidget::selectedScript() const
+{
+    const QList<QTableWidgetItem*> selected = m_scripts->selectedItems();
+    if (selected.isEmpty())
+        return QString();
+    const QTableWidgetItem* item = m_scripts->item(selected.first()->row(), 0);
+    return item ? item->data(Qt::UserRole).toString() : QString();
+}
+
+void ScriptsWidget::refreshMethods()
+{
+    if (m_applying)
+        return;
+
+    // Deleted synchronously, as in ToolSettingsWidget: deleteLater() posted
+    // before a modal dialog's exec() would wait until the dialog closes.
+    while (m_methodsLayout->count() > 1) {
+        QLayoutItem* item = m_methodsLayout->takeAt(0);
+        if (item->widget()) {
+            item->widget()->hide();
+            delete item->widget();
+        }
+        delete item;
+    }
+    auto addLabel = [this](const QString& text, const QString& style) {
+        auto* label = new QLabel(text, m_methodsPage);
+        label->setWordWrap(true);
+        label->setStyleSheet(style);
+        m_methodsLayout->insertWidget(m_methodsLayout->count() - 1, label);
+    };
+    if (!m_scripting)
+        return;
+
+    std::map<QString, QList<ScriptMethod>> groups;
+    for (const ScriptMethod& method : m_scripting->methods()) {
+        if (m_lockedVisible || m_scripting->isMethodUserConfigurable(method.name()))
+            groups[method.group()].append(method);
+    }
+    if (groups.empty()) {
+        addLabel(tr("No methods registered."), QStringLiteral("color: #888;"));
+        return;
+    }
+
+    auto addGroup = [&](const QString& title, const QList<ScriptMethod>& methods) {
+        addLabel(title, QStringLiteral("font-weight: bold; margin-top: 8px;"));
+        for (const ScriptMethod& method : methods) {
+            const QString name = method.name();
+            const bool locked = !m_scripting->isMethodUserConfigurable(name);
+            QString text = name;
+            if (method.isReadOnly())
+                text += tr("  (reads only)");
+            if (locked)
+                text += tr("  - set by the application");
+            auto* check = new QCheckBox(text, m_methodsPage);
+            check->setObjectName(QStringLiteral("scripthost_scriptsMethod_") + name);
+            check->setChecked(!locked && m_pendingMethods.contains(name) ? m_pendingMethods.value(name)
+                                                                          : m_scripting->isMethodEnabled(name));
+            check->setEnabled(!locked);
+            QString tip = method.signature();
+            if (!method.description().isEmpty())
+                tip += QStringLiteral("\n\n") + method.description();
+            check->setToolTip(tip);
+            connect(check, &QCheckBox::toggled, this, [this, name](bool on) {
+                m_pendingMethods[name] = on;
+                userChanged();
+            });
+            m_methodsLayout->insertWidget(m_methodsLayout->count() - 1, check);
+        }
+    };
+    for (const auto& group : groups) {
+        if (!group.first.isEmpty())
+            addGroup(group.first, group.second);
+    }
+    const auto ungrouped = groups.find(QString());
+    if (ungrouped != groups.end())
+        addGroup(tr("Other"), ungrouped->second);
+}
+
+void ScriptsWidget::refreshRuns()
+{
+    const QSignalBlocker blocker(m_runs);
+    m_runs->setRowCount(0);
+    const QList<ScriptEngine::RunRecord> records = m_scripting ? m_scripting->runs() : QList<ScriptEngine::RunRecord>();
+    int selectedRow = -1;
+    for (int i = int(records.size()) - 1; i >= 0; --i) {
+        const ScriptEngine::RunRecord& record = records.at(i);
+        const QString status = record.result.value(QStringLiteral("status")).toString();
+        const QString phase = record.result.value(QStringLiteral("phase")).toString();
+        const QJsonValue duration = record.result.value(QStringLiteral("duration_ms"));
+        const QStringList cells = {
+            record.started.toString(QStringLiteral("HH:mm:ss")),
+            record.name.isEmpty() ? tr("(unsaved)") : record.name,
+            record.external ? m_scripting->requesterName() : tr("user"),
+            record.dryRun ? tr("yes") : QString(),
+            phase.isEmpty() ? status : QStringLiteral("%1 (%2)").arg(status, phase),
+            duration.isUndefined() ? QString() : tr("%1 ms").arg(duration.toInt())
+        };
+        const int row = m_runs->rowCount();
+        m_runs->insertRow(row);
+        for (int column = 0; column < cells.size(); ++column)
+            m_runs->setItem(row, column, new QTableWidgetItem(cells.at(column)));
+        m_runs->item(row, 0)->setData(Qt::UserRole, record.started);
+        if (record.started == m_selectedRun)
+            selectedRow = row;
+    }
+    if (selectedRow >= 0)
+        m_runs->selectRow(selectedRow);
+    else
+        m_selectedRun = QDateTime();
+    showRunDetails();
+}
+
+void ScriptsWidget::showRunDetails()
+{
+    // Rows are newest first; by position, as two runs may start in the same millisecond.
+    const QList<QTableWidgetItem*> selected = m_runs->selectedItems();
+    const QList<ScriptEngine::RunRecord> records = m_scripting ? m_scripting->runs() : QList<ScriptEngine::RunRecord>();
+    const int index = selected.isEmpty() ? -1 : int(records.size()) - 1 - selected.first()->row();
+    if (index >= 0 && index < records.size()) {
+        const ScriptEngine::RunRecord& record = records.at(index);
+        QJsonObject result = record.result;
+        const QJsonArray logged = result.take(QStringLiteral("log")).toArray();
+        QStringList lines;
+        for (const QJsonValue& line : logged)
+            lines << (line.isString() ? line.toString() : prettyJson(line));
+        QString text;
+        text += tr("Script: %1\n").arg(record.name.isEmpty() ? tr("(unsaved)") : record.name);
+        text += tr("Started: %1 by the %2%3\n\n")
+                    .arg(record.started.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                         record.external ? m_scripting->requesterName() : tr("user"),
+                         record.dryRun ? tr(", dry run") : QString());
+        text += tr("Arguments:\n%1\n\n").arg(prettyJson(record.args));
+        text += tr("Code:\n%1\n\n").arg(record.code);
+        text += tr("Result:\n%1\n\n").arg(prettyJson(result));
+        text += tr("Log:\n%1\n").arg(lines.isEmpty() ? tr("(empty)") : lines.join(QLatin1Char('\n')));
+        m_runDetails->setPlainText(text);
+        return;
+    }
+    m_runDetails->clear();
+}
+
+// ------------------------------------------------------------ scripts
+
+ScriptEditorDialog* ScriptsWidget::openEditor()
+{
+    auto* editor = new ScriptEditorDialog(m_scripting, this);
+    editor->setAttribute(Qt::WA_DeleteOnClose);
+    editor->setModal(false);
+    return editor;
+}
+
+ScriptEditorDialog* ScriptsWidget::newScript()
+{
+    ScriptLibrary* library = m_scripting ? m_scripting->library() : nullptr;
+    if (!library || library->directory().isEmpty() || !m_scripting->userMayEditScripts())
+        return nullptr;
+    ScriptLibrary::Script fresh;
+    fresh.origin = QStringLiteral("user");
+    ScriptEditorDialog* editor = openEditor();
+    editor->setScript(fresh);
+    editor->show();
+    return editor;
+}
+
+ScriptEditorDialog* ScriptsWidget::editScript(const QString& name)
+{
+    ScriptLibrary* library = m_scripting ? m_scripting->library() : nullptr;
+    if (!library || name.isEmpty())
+        return nullptr;
+    const ScriptLibrary::Script found = library->script(name);
+    if (!found.isValid())
+        return nullptr;
+    ScriptEditorDialog* editor = openEditor();
+    editor->setScript(found);
+    editor->setReadOnly(found.readOnly || !m_scripting->userMayEditScripts());
+    editor->show();
+    return editor;
+}
+
+ScriptEditorDialog* ScriptsWidget::duplicateScript(const QString& name)
+{
+    ScriptLibrary* library = m_scripting ? m_scripting->library() : nullptr;
+    if (!library || library->directory().isEmpty() || !m_scripting->userMayEditScripts())
+        return nullptr;
+    ScriptLibrary::Script copy = library->script(name);
+    if (!copy.isValid())
+        return nullptr;
+    copy.name = tr("%1 (copy)").arg(copy.name);
+    copy.origin = QStringLiteral("user");
+    copy.filePath.clear();
+    copy.readOnly = false;
+    ScriptEditorDialog* editor = openEditor();
+    editor->setScript(copy);
+    editor->show();
+    return editor;
+}
+
+bool ScriptsWidget::deleteScript(const QString& name, bool confirm)
+{
+    ScriptLibrary* library = m_scripting ? m_scripting->library() : nullptr;
+    if (!library || name.isEmpty() || !m_scripting->userMayEditScripts())
+        return false;
+    const ScriptLibrary::Script found = library->script(name);
+    if (!found.isValid() || found.readOnly)
+        return false;
+    if (confirm && QMessageBox::question(this, tr("Delete script"),
+                                         tr("Delete the script \"%1\"?").arg(found.name)) != QMessageBox::Yes)
+        return false;
+    QString error;
+    if (!library->remove(found.name, &error)) {
+        QMessageBox::warning(this, tr("Delete script"), tr("The script could not be deleted: %1").arg(error));
+        return false;
+    }
+    return true;
+}
+
+void ScriptsWidget::openFolder()
+{
+    ScriptLibrary* library = m_scripting ? m_scripting->library() : nullptr;
+    if (!library || library->directory().isEmpty())
+        return;
+    // The directory is only created with the first saved script.
+    QDir().mkpath(library->directory());
+    QDesktopServices::openUrl(QUrl::fromLocalFile(library->directory()));
+}
+
+} // namespace ScriptHost
