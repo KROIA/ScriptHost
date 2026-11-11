@@ -104,7 +104,7 @@ QString CanvasExtension::declaration() const
         "    /** Adds it to the frame: outlined with stroke, filled with fill. Can be drawn again. */\n"
         "    draw(style?: Style): void;\n"
         "  }\n"
-        "  interface Tween { value: number; done: boolean; step(dtMs: number): number; reset(): void }\n"
+        "  interface Tween { value: number; done: boolean; elapsed: number; step(dtMs: number): number; reset(): void }\n"
         "  /** The canvas size in pixels. On a resize, on(\"resize\", e => ...) gets {width, height}. */\n"
         "  const width: number;\n"
         "  const height: number;\n"

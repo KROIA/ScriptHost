@@ -34,9 +34,10 @@ struct CanvasShared;
 //
 // The canvas is a transparent child of `target` that takes no mouse clicks
 // and no focus, fills `target` and follows its size, and stays above
-// `target`'s other children (raised again when a child is added and on every
-// present). It goes with `target`; deleting it detaches it: `gfx` is gone
-// from new runs, and the runs that have it draw into nothing.
+// `target`'s other children (raised again when a child is added, and at a
+// present when something came over it). It goes with `target`; deleting it
+// detaches it: `gfx` is gone from new runs, and the runs that have it draw
+// into nothing.
 // ponytail: a sibling widget cannot paint over a native child (a
 // QOpenGLWidget in native mode, an embedded native window); the upgrade path
 // is a frameless, see-through, input-transparent tool window.

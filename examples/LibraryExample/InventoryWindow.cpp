@@ -9,6 +9,7 @@
 //   6. Restore the user's choices from the last session.
 //   7. Show what scripts do (signals), and offer the user the widgets.
 //   8. Hand the user's keys and clicks to scripts that ask for them.
+//   9. Let scripts draw over the window: highlights, and a small game.
 //
 // Everything else - checking a script before it runs, limits, the approval
 // dialog, the Scripts window with its editor and debugger - comes from the
@@ -22,7 +23,10 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QImage>
 #include <QLabel>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPlainTextEdit>
 #include <QSettings>
 #include <QSplitter>
@@ -30,6 +34,7 @@
 #include <QTableWidget>
 #include <QToolBar>
 #include <QVBoxLayout>
+#include <cmath>
 
 namespace
 {
@@ -38,6 +43,8 @@ const char* const kScriptSettingsKey = "scripting/userSettings";
 const char* const kRestockScript = "Restock low items";
 const char* const kMonitorScript = "Stock monitor";
 const char* const kInputScript = "Input logger";
+const char* const kHighlightScript = "Highlight a widget";
+const char* const kGameScript = "Paddle game";
 
 // ---- Helpers for the table: the application's own data, nothing ScriptHost-specific
 
@@ -122,13 +129,26 @@ InventoryWindow::InventoryWindow(QWidget* parent)
     m_input->setMinimumHeight(48);
     m_input->setFocusPolicy(Qt::StrongFocus);
 
+    // A plain widget for the game script to play on (step 9). It takes the
+    // keys once clicked, like the input area.
+    m_field = new QWidget(this);
+    m_field->setObjectName("gameField");
+    m_field->setMinimumHeight(160);
+    m_field->setFocusPolicy(Qt::StrongFocus);
+    m_field->setAutoFillBackground(true);
+    QPalette fieldPalette = m_field->palette();
+    fieldPalette.setColor(QPalette::Window, QColor(240, 244, 250));
+    m_field->setPalette(fieldPalette);
+
     auto* split = new QSplitter(Qt::Vertical, this);
     split->addWidget(m_table);
     split->addWidget(m_input);
+    split->addWidget(m_field);
     split->addWidget(m_log);
     split->setStretchFactor(0, 3);
     split->setStretchFactor(1, 0);
     split->setStretchFactor(2, 2);
+    split->setStretchFactor(3, 2);
     setCentralWidget(split);
 
     setUpScripting();
@@ -202,7 +222,62 @@ void InventoryWindow::setUpScripting()
     // gives it. Requested runs get none of it unless allowed:
     // m_engine->allowEventForRequestedRuns("key") - not done here, as a
     // program that may read the user's keys could log them.
+    // The game field's keys go to scripts too. input.mouse() follows the
+    // latest forwarder: the input area.
+    ScriptHost::forwardInput(m_engine, m_field);
     ScriptHost::forwardInput(m_engine, m_input);
+
+    // ---- 9. Drawing over the window ---------------------------------------
+    setUpCanvas();
+}
+
+// A canvas over the whole window: scripts get the global `gfx` and draw on
+// it - shapes, text, images - while the window works as before (the canvas
+// takes no clicks). Shapes drawn on gfx.widget("objectName") follow that
+// widget when it moves or resizes.
+void InventoryWindow::setUpCanvas()
+{
+    ScriptHost::ScriptCanvas* canvas = ScriptHost::attachCanvas(m_engine, this);
+
+    // Scripts read no files: images come from the application, by name.
+    QImage ball(12, 12, QImage::Format_ARGB32_Premultiplied);
+    ball.fill(Qt::transparent);
+    {
+        QPainter painter(&ball);
+        painter.setRenderHint(QPainter::Antialiasing);
+        QRadialGradient shade(4, 4, 8);
+        shade.setColorAt(0, QColor(255, 160, 160));
+        shade.setColorAt(1, QColor(190, 20, 20));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(shade);
+        painter.drawEllipse(QRectF(0, 0, 12, 12));
+    }
+    canvas->addImage("ball", ball);
+
+    // A drawing function of the application: gfx.draw.star(x, y, r) in
+    // scripts, painted with the script's style and transform. The bounds
+    // function says where it paints, so that only that area is repainted.
+    auto starBounds = [](const QVariantList& args) {
+        const double r = args.value(2).toDouble();
+        return QRectF(args.value(0).toDouble() - r, args.value(1).toDouble() - r, 2 * r, 2 * r);
+    };
+    canvas->addDrawFunction("star", [](QPainter& painter, const QVariantList& args) {
+        const QPointF centre(args.value(0).toDouble(), args.value(1).toDouble());
+        const double r = args.value(2).toDouble();
+        QPainterPath star;
+        for (int i = 0; i < 10; ++i) {
+            const double angle = (i * 0.2 - 0.5) * 3.141592653589793;
+            const double reach = i % 2 ? r * 0.45 : r;
+            const QPointF point = centre + QPointF(std::cos(angle), std::sin(angle)) * reach;
+            if (i == 0)
+                star.moveTo(point);
+            else
+                star.lineTo(point);
+        }
+        star.closeSubpath();
+        painter.drawPath(star);
+    }, "/** A five-pointed star around (x, y), r its outer radius. */\n"
+       "function star(x: number, y: number, r: number): void;", starBounds);
 }
 
 void InventoryWindow::registerMethods()
@@ -305,6 +380,14 @@ void InventoryWindow::buildToolBar()
         runUntilStopped(kMonitorScript, QJsonObject{{"threshold", 50}, {"seconds", 5}});
     });
     bar->addAction(QString("Start '%1'").arg(kInputScript), this, [this]() { runUntilStopped(kInputScript); });
+    bar->addSeparator();
+    bar->addAction("Highlight the input area", this, [this]() {
+        runUntilStopped(kHighlightScript, QJsonObject{{"widget", "scriptInput"}});
+    });
+    bar->addAction(QString("Start '%1'").arg(kGameScript), this, [this]() {
+        runUntilStopped(kGameScript);
+        m_field->setFocus();    // the keys go to the field
+    });
     bar->addSeparator();
     bar->addAction("Request a script", this, [this]() { requestScript(); });
 }

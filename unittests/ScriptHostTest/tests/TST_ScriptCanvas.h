@@ -11,6 +11,7 @@
 
 #include "UnitTest.h"
 #include "TestSupport.h"
+#include <QElapsedTimer>
 #include <QFontMetricsF>
 #include <QImage>
 #include <QMap>
@@ -19,6 +20,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QWidget>
+#include <cstdio>
 
 class TST_ScriptCanvas : public UnitTest::Test
 {
@@ -49,6 +51,7 @@ public:
         ADD_TEST(TST_ScriptCanvas::testFrameLoopCoalesces);
         ADD_TEST(TST_ScriptCanvas::testHelpers);
         ADD_TEST(TST_ScriptCanvas::testDrawFunctions);
+        ADD_TEST(TST_ScriptCanvas::testBenchmark);
     }
 
 private:
@@ -920,6 +923,64 @@ private:
         TEST_COMPARE(field.canvas->drawFunctions(), QStringList{"blob"});
         TEST_ASSERT(!field.engine.check("gfx.draw.square(1, 2, 3);").ok);
         TEST_ASSERT(!field.engine.apiDefinition("gfx").contains("function square"));
+    }
+
+    // Prints what a frame of moving primitives costs: recording on the run's
+    // thread, painting on the GUI thread (into an image, as the raster backing
+    // store does). Asserts nothing about speed.
+    TEST_FUNCTION(testBenchmark)
+    {
+        TEST_START;
+
+        Field field(800, 600);
+        field.canvas->addDrawFunction("dot", [](QPainter& painter, const QVariantList& a) {
+            painter.drawRect(QRectF(a.value(0).toDouble(), a.value(1).toDouble(), 4, 4));
+        }, "function dot(x: number, y: number): void;");
+        const struct { const char* name; const char* draw; } forms[] = {
+            {"single, style object", "gfx.rect(x, y, 4, 4, s);"},
+            {"single, gfx.style() ", "gfx.rect(x, y, 4, 4);"},
+            {"batch, gfx.rects()  ", "v.push(x, y, 4, 4);"},
+            {"custom, no bounds   ", "gfx.draw.dot(x, y);"},
+        };
+        const int frames = 10;
+        for (int count : {2000, 5000}) {
+            for (const auto& form : forms) {
+                Outcome out;
+                const Engine::RunId id = field.start(QString(
+                    "const s = {fill: '#3060c0', stroke: 'none'};\n"
+                    "gfx.style(s);\n"
+                    "const t0 = Date.now();\n"
+                    "for (let f = 0; f < %1; ++f) {\n"
+                    "    gfx.clear();\n"
+                    "    const v = [];\n"
+                    "    for (let i = 0; i < %2; ++i) {\n"
+                    "        const x = (i * 7 + f * 3) % 790, y = (Math.floor(i / 100) * 11 + f) % 590;\n"
+                    "        %3\n"
+                    "    }\n"
+                    "    if (v.length) gfx.rects(v);\n"
+                    "    gfx.present();\n"
+                    "}\n"
+                    "log('record ' + (Date.now() - t0) / %1);").arg(frames).arg(count).arg(form.draw), out);
+                TEST_ASSERT(TestSupport::spin([&]() { return field.logs.value(id).contains("ready"); }, 120000));
+                TestSupport::spin([]() { return false; }, 50);      // the last frame taken
+                QImage image(field.canvas->size(), QImage::Format_ARGB32_Premultiplied);
+                image.fill(Qt::transparent);
+                field.canvas->render(&image);                        // warm up
+                QElapsedTimer clock;
+                clock.start();
+                for (int i = 0; i < frames; ++i) {
+                    image.fill(Qt::transparent);
+                    field.canvas->render(&image);
+                }
+                const double paint = double(clock.nsecsElapsed()) / 1e6 / frames;
+                const QString record = field.logs.value(id).filter("record ").value(0).mid(7);
+                std::printf("ScriptCanvas benchmark: %d primitives, %s: record %s ms/frame, paint %.2f ms/frame\n",
+                      count, form.name, qPrintable(record), paint);
+                std::fflush(stdout);
+                field.engine.postEvent(id, "done", QJsonObject());
+                TEST_ASSERT(TestSupport::spin([&]() { return out.done; }));
+            }
+        }
     }
 };
 

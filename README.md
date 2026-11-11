@@ -4,9 +4,9 @@ A Qt library that makes a C++ application scriptable in JavaScript. The applicat
 
 A script can call exactly the registered methods. The JavaScript engine (`QJSEngine`) has no file, network or process access of its own.
 
-Two libraries: **ScriptHost**, the engine (Qt Core + Qml, no GUI), and **ScriptHostWidgets** on top of it (the Scripts window, the editor with its debugger, the approval dialog).
+Two libraries: **ScriptHost**, the engine (Qt Core + Qml, no GUI), and **ScriptHostWidgets** on top of it (the Scripts window, the editor with its debugger, the approval dialog, a canvas scripts draw on).
 
-Version 2.0 breaks the 1.x API (run ids, the widgets split off); see [Migrating from 1.x to 2.0](documentation/Guide.md#migrating-from-1x-to-20). Version 2.1 adds events: keys, mouse clicks and the application's own ([New in 2.1](documentation/Guide.md#new-in-21)).
+Version 2.0 breaks the 1.x API (run ids, the widgets split off); see [Migrating from 1.x to 2.0](documentation/Guide.md#migrating-from-1x-to-20). Version 2.1 adds events: keys, mouse clicks and the application's own ([New in 2.1](documentation/Guide.md#new-in-21)). Version 2.2 adds a canvas for scripts and extensions of the application's own ([New in 2.2](documentation/Guide.md#new-in-22)).
 
 ## Quick start
 
@@ -34,7 +34,7 @@ const ScriptHost::ScriptEngine::RunId id =
 // engine->stop(id) ends it early.
 ```
 
-`examples/LibraryExample` is a small inventory application that uses everything below, commented in the order an application sets it up, including a stock monitor that runs on a `setInterval` timer until it is stopped and an input logger that reacts to keys and clicks. `examples/ConsoleExample` uses the engine alone, in a `QCoreApplication`.
+`examples/LibraryExample` is a small inventory application that uses everything below, commented in the order an application sets it up, including a stock monitor that runs on a `setInterval` timer until it is stopped, an input logger that reacts to keys and clicks, a script that highlights a widget and a small paddle game on the canvas. `examples/ConsoleExample` uses the engine alone, in a `QCoreApplication`.
 
 ## Features
 
@@ -44,6 +44,8 @@ const ScriptHost::ScriptEngine::RunId id =
 - **Concurrent runs**: each `run()` returns a `RunId`; `stop(id)`, `stopAll()`, `activeRuns()`. Up to `Limits::maxConcurrentRuns` at once (default 8).
 - **Long-running scripts**: `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`. A run lives until its timers are done, it is stopped or it reaches its limit; the application can lift the limits for its own runs (`RunOptions::timeoutMs = 0`). `stop()` ends a run at once, also while it sleeps, waits or loops.
 - **Events**: a script subscribes with `on(name, fn)`; the application posts with `postEvent(name, data)` - a tick, a sensor value, anything. `forwardInput(engine, widget)` (ScriptHostWidgets) turns a widget's keys and mouse clicks into `"key"` and `"mouse"` events, and `input.mouse()` reads the pointer. Handlers run after the script's body has returned, between its timers. Requested runs get no events unless the application allows them per name.
+- **Drawing** (ScriptHostWidgets): `attachCanvas(engine, widget)` gives scripts `gfx`, a transparent canvas over the widget - shapes, text, paths, gradients, transforms, images of the application, shapes that follow a named widget, a frame loop (`gfx.onFrame`) and helpers for games. Recorded on the script's thread and painted in one go: thousands of moving shapes per frame. The application adds drawing functions of its own (`addDrawFunction`). See [the canvas](documentation/Guide.md#drawing-over-the-window-the-canvas).
+- **Extensions**: `ScriptExtension` adds an object of the application to every run, called directly on the script's thread - for what is called too often for a method, or keeps state per run. See [Extensions](documentation/Guide.md#extensions-objects-of-your-own).
 - **Output**: `log()`, `print()` and `console.log()` lines arrive as `runLog` and, with `setOutput(device)`, on any `QIODevice` (stdout, a file, a socket).
 - **Limits**: run time, total method calls, calls per method (`setMaxCallsPerRun`), log lines, runs at once.
 - **Dry run**: read-only methods run, changing ones are only recorded.
@@ -71,6 +73,16 @@ and in the application:
 ```cpp
 ScriptHost::forwardInput(engine, gameView);                       // keys and clicks of gameView
 engine->postEvent("sensor", QJsonObject{{"temperature", 21.5}}); // an event of its own
+```
+
+Drawing, with a canvas attached (`ScriptHost::attachCanvas(engine, mainWindow)`):
+
+```js
+const name = gfx.widget('customerName');                 // a widget, by objectName
+gfx.roundedRect(name, 6, {stroke: 'red', width: 3, padding: 4});   // follows the widget
+gfx.arrow(400, 40, name, {stroke: 'red', width: 3});
+gfx.present();
+setTimeout(() => {}, 5000);                              // shown while the run lasts
 ```
 
 The full description is in [documentation/Guide.md](documentation/Guide.md).

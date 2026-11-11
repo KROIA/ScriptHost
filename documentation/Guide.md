@@ -43,14 +43,14 @@ engine->registerMethod(read, [this](const QJsonObject& args) -> QJsonValue {
 engine->run("return db.readObject('a1').name;", {}, [](const QJsonObject& result) { ... });
 ```
 
-`examples/LibraryExample` is a complete application: an inventory table with its methods, saved scripts, the Scripts window, the editor, a requested run, a stock monitor that runs until it is stopped and an input logger that reacts to keys and clicks, in the order an application sets them up. `examples/ConsoleExample` is the engine alone in a `QCoreApplication`, its script's lines printed to stdout.
+`examples/LibraryExample` is a complete application: an inventory table with its methods, saved scripts, the Scripts window, the editor, a requested run, a stock monitor that runs until it is stopped, an input logger that reacts to keys and clicks, and a canvas with a script that highlights a widget and a small paddle game, in the order an application sets them up. `examples/ConsoleExample` is the engine alone in a `QCoreApplication`, its script's lines printed to stdout.
 
 ### Two libraries
 
 | Library | Qt modules | Include | Contains |
 |---|---|---|---|
-| `ScriptHost` | Core, Qml | `ScriptHost.h` | `ScriptEngine`, `ScriptMethod`, `ScriptLibrary`: everything to run scripts |
-| `ScriptHostWidgets` | Core, Qml, Gui, Widgets | `ScriptHostWidgets.h` (includes `ScriptHost.h`) | `ScriptsWidget`, `ScriptEditorDialog` with its debugger, the approval dialog (`useApprovalDialog`), keys and mouse for scripts (`forwardInput`) |
+| `ScriptHost` | Core, Qml | `ScriptHost.h` | `ScriptEngine`, `ScriptMethod`, `ScriptLibrary`, `ScriptExtension`: everything to run scripts |
+| `ScriptHostWidgets` | Core, Qml, Gui, Widgets | `ScriptHostWidgets.h` (includes `ScriptHost.h`) | `ScriptsWidget`, `ScriptEditorDialog` with its debugger, the approval dialog (`useApprovalDialog`), keys and mouse for scripts (`forwardInput`), drawing for scripts (`attachCanvas`, `ScriptCanvas`) |
 
 A program without windows - a service, a command-line tool - links the engine alone and needs neither Qt Gui nor Qt Widgets. In a project built from the same CMake template, `ScriptHost.cmake` in the `dependencies/` folder links both libraries; for the engine alone, set this before it is included:
 
@@ -166,7 +166,7 @@ declare namespace db {
 }
 ```
 
-The user sees it in the reference pane of the script editor. A program that writes scripts (a remote client, an assistant) can be given the same text. Without a query it is everything, or an index with one line per method when the text is longer than `setApiBudgetChars()` (default 6000; 0 means no limit). With a query (a method name, a namespace, keywords) it is the matching declarations.
+The user sees it in the reference pane of the script editor. A program that writes scripts (a remote client, an assistant) can be given the same text. Without a query it is everything, or an index with one line per method when the text is longer than `setApiBudgetChars()` (default 6000; 0 means no limit). With a query (a method name, a namespace, keywords) it is the matching declarations. The declarations of [extensions](#extensions-objects-of-your-own) follow the methods'; with a query, an extension comes whole when its name or a word of its declaration matches - `apiDefinition("gfx")` is the whole canvas API, which is longer than the default budget on its own.
 
 ## Running a script
 
@@ -243,7 +243,7 @@ return "monitoring";
 
 The script's body runs first; what it returns is the run's `result`. Then the run waits for its timers and calls each one when it is due, on the script's thread, one after the other. Event handlers (`on`) are called the same way, between the timers. The run ends
 
-- when no timer and no event handler is left (every `setTimeout` fired or cleared, every `setInterval` cleared, every handler removed with `off`): with the result of the body, `duration_ms` counting the whole time;
+- when no timer and no event handler is left (every `setTimeout` fired or cleared, every `setInterval` cleared, every handler removed with `off`) and no [extension](#extensions-objects-of-your-own) keeps it (`gfx.onFrame` does, until `gfx.offFrame`): with the result of the body, `duration_ms` counting the whole time;
 - when it is stopped (phase `cancelled`) or reaches its time limit (phase `limit`): what the body returned is lost;
 - when a timer's function or an event handler throws: phase `runtime`, with the line.
 
@@ -375,7 +375,7 @@ while (true) {                  // events wait until the body returns: never
 }
 ```
 
-Events are delivered in the order they were posted, ahead of timers that are due - but a due timer waits for at most 64 events, then the due timers run before the next event. Each run calls its handlers on its own thread, one at a time. An event is not a method call: it does not count toward `maxCalls` and is not listed in `calls` - but what a handler calls is, and so is `input.mouse()`. An exception thrown in a handler ends the run with phase `runtime`.
+Events are delivered in the order they were posted, ahead of timers that are due - but a due timer waits for at most 64 events, then the due timers run before the next event. The callbacks an [extension](#extensions-objects-of-your-own) schedules (the frames of `gfx.onFrame`, for one) wait in the same way and count toward those 64; while events and such callbacks both wait, they take turns, so a busy frame loop cannot hold back keys and clicks. Each run calls its handlers on its own thread, one at a time. An event is not a method call: it does not count toward `maxCalls` and is not listed in `calls` - but what a handler calls is, and so is `input.mouse()`. An exception thrown in a handler ends the run with phase `runtime`.
 
 Each run's queue holds at most `Limits::maxQueuedEvents` events (default 1000; 0 = no limit, see [Limits](#limits)). When an application posts faster than the script handles, the oldest waiting event is dropped to make room for the new one. The first drop writes one line to the run's log, `events dropped: queue full (1000)`, and the result carries the count: `"events_dropped": 12`. Mouse moves are not posted (below), so that ordinary input does not fill the queue.
 
@@ -493,6 +493,366 @@ on('sensor', data => {
 });
 return 'watching';
 ```
+
+## Drawing over the window: the canvas
+
+ScriptHostWidgets gives scripts a drawing surface over a widget: to point the user at a field, mark what a script found, draw a chart, or run a small game. The application attaches it once:
+
+```cpp
+#include "ScriptHostWidgets.h"
+
+ScriptHost::ScriptCanvas* canvas = ScriptHost::attachCanvas(engine, mainWindow);
+```
+
+From then on, new runs have the global `gfx`:
+
+```js
+gfx.rect(10, 10, 80, 40, {stroke: 'red', width: 2});
+gfx.text(50, 30, 'Hello', {fill: '#202020', align: 'center', valign: 'middle'});
+gfx.present();
+setTimeout(() => {}, 5000);     // the drawing stays while the run does
+```
+
+The canvas is a transparent child of the target widget. It covers the target, follows its size, stays above the target's other children, and takes no clicks and no focus: the window works as before. It goes with the target; deleting it detaches it - `gfx` is gone from new runs, and runs that have it draw into nothing. Coordinates are pixels of the target, (0, 0) top left; `gfx.width` and `gfx.height` are its size.
+
+### Frames and layers
+
+`gfx` is immediate mode. The drawing functions record into a frame on the script's own thread - no method calls, no JSON, nothing counted toward `maxCalls`. `present()` hands the frame to the canvas without waiting and starts an empty one.
+
+- **A presented frame stays** on screen until the run presents the next. A highlight drawn once costs nothing after that. A frame that was never presented is never shown.
+- **The newest frame wins.** A script that presents faster than the screen can show loses the frames in between, not time.
+- **Each run has a layer**, painted in the order the runs started (a later run on top). The layer goes when the run ends - finished, stopped, failed or at a limit. To keep a drawing up, the script stays alive: a timer, an `on()` handler or `gfx.onFrame`.
+- **The transform and `gfx.style()` stay** from one frame to the next, like a canvas in a browser. `gfx.clear()` empties the frame being drawn and keeps them; `save()` / `restore()` or `resetTransform()` put them back.
+- Only what changed is repainted: the area of the run's old and new frame.
+
+On a resize every run with a handler gets the event `"resize"` `{width, height}`.
+
+### The functions
+
+`style` is always optional; what it leaves out comes from `gfx.style()`. The full list with types is in `apiDefinition("gfx")`.
+
+| Function | |
+|---|---|
+| `clear()` | Empties the frame being drawn; what is on screen stays until `present()` |
+| `style(style?)` | The defaults for what follows; without an argument the built-in ones. It replaces the defaults; it does not add to them |
+| `save()`, `restore()` | Keeps the transform and `gfx.style()` until `restore()` |
+| `translate(x, y)`, `rotate(radians)`, `scale(x, y?)`, `resetTransform()` | The transform of what follows; `rotate` turns clockwise |
+| `rect(x, y, w, h, style?)`, `roundedRect(x, y, w, h, radius, style?)` | |
+| `circle(cx, cy, r, style?)`, `ellipse(cx, cy, rx, ry, style?)` | |
+| `line(x1, y1, x2, y2, style?)` | |
+| `arrow(x1, y1, x2, y2, style?)` | The head at (x2, y2), in the stroke colour; `head` sets its length |
+| `polyline(points, style?)`, `polygon(points, style?)` | `points`: `[x0, y0, x1, y1, ...]`; a polygon is closed |
+| `text(x, y, text, style?)` | One line, at (x, y) placed by `align` / `valign`. Its colour is `fill`, else `stroke` |
+| `rects(values, style?)`, `circles(values, style?)`, `lines(values, style?)` | Many of one style: `[x, y, w, h, ...]`, `[cx, cy, r, ...]`, `[x1, y1, x2, y2, ...]` |
+| `path()` | A path to build: `moveTo`, `lineTo`, `quadTo`, `cubicTo`, `arc`, `close`, then `draw(style?)` |
+| `linearGradient(x0, y0, x1, y1, stops)`, `radialGradient(cx, cy, r, stops, fx?, fy?)` | A gradient for a style's `fill`. `stops`: `[[0, 'red'], [1, 'blue']]` |
+| `image(name, x, y, w?, h?, source?, style?)`, `imageSize(name)` | An image of the application; see [Images](#images) |
+| `widget(objectName)` | A handle to draw on a widget; see [Shapes on widgets](#shapes-on-widgets) |
+| `widgetRect(objectName)` | Where the widget is now: `{x, y, width, height}`, or `null` when it is missing or hidden |
+| `onFrame(fn)`, `offFrame()` | `fn(dt)` once per screen refresh; see [The frame loop](#the-frame-loop) |
+| `measureText(text, font?)` | `{width, height, ascent, descent}`; without a font, `gfx.style()`'s |
+| `pointInRect`, `pointInCircle`, `rectsOverlap`, `circlesOverlap`, `ease`, `tween` | For games; see [Helpers](#helpers) |
+| `draw.<name>(...)` | A drawing function of the application; see [Drawing functions of the application](#drawing-functions-of-the-application) |
+| `present()` | Shows the frame drawn since the last `present()` and starts an empty one. Does not wait |
+| `width`, `height` | The canvas size in pixels |
+
+A wrong argument throws in the script, with the function's name: `gfx.rect: expects numbers`, `gfx.line: the style's dash is one of solid, dash, dot, dashDot`. Uncaught, the run ends with phase `runtime`.
+
+### Styles
+
+| Key | |
+|---|---|
+| `stroke` | The outline colour: `"#rrggbb"`, `"#aarrggbb"`, a CSS name (`"red"`) or `"none"`. Default black |
+| `fill` | A colour as for `stroke`, or a gradient. Default none |
+| `width` | Outline width; 0: no outline. Default 1 |
+| `dash` | `"solid"` (default), `"dash"`, `"dot"`, `"dashDot"` |
+| `opacity` | 0..1 |
+| `head` | Arrow head length; default 4 x `width`, at least 8 |
+| `padding` | Space around a widget the shape is drawn on |
+| `font` | `{family, size, bold, italic}`; `size` in pixels, default 14 |
+| `align` | Where text's x is: `"left"` (default), `"center"`, `"right"` |
+| `valign` | Where text's y is: `"top"` (default), `"middle"`, `"bottom"`, `"baseline"` |
+
+An unknown key throws (`gfx.rect: unknown style 'colour'`).
+
+### Transforms and paths
+
+```js
+gfx.save();
+gfx.translate(100, 50);
+gfx.rotate(Math.PI / 4);                        // radians, clockwise
+gfx.rect(-20, -10, 40, 20, {fill: 'teal', stroke: 'none'});
+gfx.restore();
+
+gfx.path()
+   .moveTo(10, 100).lineTo(60, 100).quadTo(80, 60, 100, 100)
+   .arc(140, 100, 20, Math.PI, 0)               // start and end angle, clockwise from 3 o'clock
+   .close()
+   .draw({fill: '#ffe0a0', stroke: '#a06000'});
+```
+
+`arc(cx, cy, r, start, end, counterclockwise?)` works as in a browser canvas: a line joins it to the current point. A path can be drawn again.
+
+### Gradients
+
+```js
+const sky = gfx.linearGradient(0, 0, 0, gfx.height, [[0, '#a0c8ff'], [1, 'white']]);
+gfx.rect(0, 0, gfx.width, gfx.height, {fill: sky, stroke: 'none'});
+gfx.circle(80, 80, 30, {fill: gfx.radialGradient(80, 80, 30, [[0, 'yellow'], [1, 'orange']])});
+```
+
+A gradient is frozen when it is made. Make it once and use it in many frames; a new one each frame is read again each frame.
+
+### Images
+
+Scripts read no files. The application adds the images they may draw, by name:
+
+```cpp
+canvas->addImage("ship", QImage(":/sprites/ship.png"));
+canvas->addImage("tiles", QImage(":/sprites/tiles.png"));
+```
+
+```js
+gfx.image('ship', x, y);                                      // at its size
+gfx.image('ship', x, y, 64, 32);                              // scaled
+gfx.image('tiles', x, y, 16, 16, {sx: 32, sy: 0, sw: 16, sh: 16});   // a sprite of a sheet
+const size = gfx.imageSize('ship');                           // {width, height}, or null
+```
+
+An unknown name throws (`gfx.image: no image 'x'`). The style's `opacity` applies. `removeImage(name)` takes one back; `images()` lists them. Replacing or removing one repaints the canvas.
+
+### Shapes on widgets
+
+A shape can be drawn on a widget of the target instead of at numbers. It then follows the widget:
+
+```js
+const field = gfx.widget('customerName');                     // a widget's objectName
+gfx.roundedRect(field, 6, {stroke: 'red', width: 3, padding: 4});
+gfx.arrow(400, 40, field, {stroke: 'red', width: 3});
+gfx.text(field, 'required', {fill: 'red', align: 'right', valign: 'bottom'});
+gfx.present();
+```
+
+`rect`, `roundedRect`, `ellipse` and `text` take a widget in place of the numbers; `arrow` takes one for either end or both (`arrow(x1, y1, w)`, `arrow(w, x2, y2)`, `arrow(w1, w2)`), and ends on the widget's edge. Text is placed inside the widget by `align` / `valign`. `padding` widens the widget's rectangle.
+
+The rules:
+
+- The widget is the first descendant of the target with that `objectName`. It is looked up on the GUI thread, when the frame is shown.
+- Where it is, is worked out on the GUI thread, from where the widget is now: the shape follows moves, resizes, splitters and scrolling without a new `present()`. Only the layers that have a shape on that widget are repainted.
+- While the widget is hidden or missing, the shape is not drawn; it comes back when the widget does. A widget that first appears after the frame was presented shows at the run's next `present()`.
+- Shapes on widgets ignore the transform.
+- `gfx.widgetRect(name)` returns the rectangle at the moment of the call. It asks the GUI thread and waits for the answer: call it once, or on `"resize"`, not for every frame.
+
+### The frame loop
+
+```js
+let x = 0;
+gfx.onFrame(dt => {                 // dt: milliseconds since the last frame
+    x = (x + 0.2 * dt) % gfx.width;
+    gfx.clear();
+    gfx.circle(x, 50, 10, {fill: 'red', stroke: 'none'});
+    gfx.present();
+});
+```
+
+`fn(dt)` is called once per screen refresh (`QScreen::refreshRate`, 60 when unknown), from one timer of the canvas for every run, which runs only while some run has a frame handler. A handler slower than a refresh skips frames - none pile up - so movement goes by `dt`, not by counting frames. Frames run between events and timers like an event handler, and take turns with key and mouse events, so input still arrives.
+
+A frame handler keeps the run alive until `gfx.offFrame()`; then, with no timer and no handler left, the run ends. An exception in the handler ends the run (phase `runtime`). Mind the time limit: with the engine's `Limits` a run ends after 5 minutes; a game the application starts sets `RunOptions::timeoutMs = 0` (see [Running until stopped](#running-until-stopped)).
+
+### Helpers
+
+For games, all in the script, without a round trip to the application:
+
+| | |
+|---|---|
+| `pointInRect(px, py, x, y, w, h)`, `pointInCircle(px, py, cx, cy, r)` | Hit tests |
+| `rectsOverlap(x1, y1, w1, h1, x2, y2, w2, h2)`, `circlesOverlap(x1, y1, r1, x2, y2, r2)` | Collisions |
+| `measureText(text, font?)` | `{width, height, ascent, descent}` of one line |
+| `ease.linear`, `inQuad`, `outQuad`, `inOutQuad`, `inCubic`, `outCubic`, `inOutCubic`, `outBack`, `outBounce` | 0..1 to 0..1 |
+| `tween(from, to, ms, easing?)` | `{value, done, elapsed, step(dt), reset()}`; `easing` a name of `gfx.ease` or a function; `step(dt)` moves it on and returns the value |
+
+```js
+const fade = gfx.tween(1, 0, 500, 'outQuad');
+gfx.onFrame(dt => {
+    const opacity = fade.step(dt);
+    ...
+    if (fade.done) gfx.offFrame();
+});
+```
+
+### Drawing functions of the application
+
+The application can add drawing functions of its own, painted with `QPainter`, for what scripts would otherwise build from many shapes:
+
+```cpp
+canvas->addDrawFunction("star",
+    [](QPainter& painter, const QVariantList& args) {          // at paint time
+        painter.drawPath(starPath(args[0].toDouble(), args[1].toDouble(), args[2].toDouble()));
+    },
+    "/** A star around (x, y). */\nfunction star(x: number, y: number, r: number): void;",
+    [](const QVariantList& args) {                             // where it paints
+        const double r = args[2].toDouble();
+        return QRectF(args[0].toDouble() - r, args[1].toDouble() - r, 2 * r, 2 * r);
+    });
+```
+
+```js
+gfx.style({fill: 'gold', stroke: '#a07000'});
+gfx.draw.star(100, 60, 20);
+```
+
+- The arguments come as they were passed: numbers, strings, arrays as `QVariantList`, objects as `QVariantMap`.
+- The painter has the call's transform, pen, brush and opacity set, from `gfx.style()`. What the function changes on the painter is undone after it.
+- The bounds function says where a call paints, in its own coordinates, so only that is repainted. **Without it, every frame with such a call repaints the whole canvas.**
+- The declaration appears in `apiDefinition()`, inside `namespace draw`; an empty one declares `function name(...args: any[]): void;`. `check()` knows the function at once (`methodsChanged` is emitted) and catches typos below `gfx.draw.` with a "did you mean".
+- **A run has the functions there were when it started**: one added later reaches the next runs.
+- `removeDrawFunction(name)` takes one back; `drawFunctions()` lists them.
+
+### Requested runs and dry runs
+
+A requested run gets no `gfx` - and no `"resize"` event - unless the application allows it:
+
+```cpp
+canvas->setAllowedForRequestedRuns(true);
+```
+
+Until then `check(code, true)` reports `the application does not let requested scripts use 'gfx'` and `gfx` is undefined in such a run. A dry run draws as any other run: drawing changes none of the application's data.
+
+### Speed
+
+- **Use the batch forms** (`rects`, `circles`, `lines`) for many shapes of one style: one call for all of them.
+- **Use one style object or `gfx.style()`** for many shapes, not a new object per shape. A style object is read on every call; `gfx.style()` once.
+- **Present once per frame.** Each `present()` hands a frame over; the canvas shows only the newest.
+- **Reuse gradients**, and give drawing functions a bounds function.
+- **Do not call `widgetRect` per frame**: it waits for the GUI thread.
+
+What a frame of moving 4 x 4 rectangles costs. *Record*: the script drawing the frame, on its thread, `present()` included. *Paint*: the canvas painting the frame on the GUI thread (into an image, as Qt's raster backing store does). Recording and painting run side by side, on two threads.
+
+| ms per frame | 2,000 shapes: record | paint | 5,000 shapes: record | paint |
+|---|---|---|---|---|
+| `rect(x, y, w, h, style)`, a style object per call | 1.6 | 0.2 | 6.7 | 0.7 |
+| `rect(x, y, w, h)` after `gfx.style()` | 1.3 | 0.2 | 4.1 | 0.7 |
+| `rects([...])`, the array built each frame | 0.4 | 0.4 | 1.4 | 0.7 |
+| `draw.dot(x, y)`, a drawing function without bounds | 3.6 | 1.1 | 9.2 | 2.7 |
+
+Release build (x64-Release, MSVC 2022, Qt 5.15.2), Windows 10, Intel Core i9-13900K. 2,000 moving shapes take under 2 ms a frame - far within the 16.7 ms of a 60 Hz screen. A Debug build is 10 to 20 times slower at recording (5,000 shapes: 54 / 43 / 18 / 74 ms) and about 5 times at painting.
+
+The numbers come from the test `TST_ScriptCanvas::testBenchmark` (it prints them and asserts nothing): `installation/bin/ScriptHostTest.exe`.
+
+### Known limits
+
+- **One canvas per engine.** A second canvas attached to the same engine takes `gfx` over for new runs.
+- **Text is one line**: no wrapping, no `maxWidth`. `measureText` tells a script how wide a line is.
+- **Native child widgets**: the canvas is a sibling widget, and cannot paint over a native child (a `QOpenGLWidget` in native mode, an embedded native window). Over such a widget it stays empty.
+- **The definition budget.** The declaration of `gfx` is longer than the default `setApiBudgetChars()` (6000), so `apiDefinition()` without a query shows `gfx` as one index line. A program that writes scripts (an assistant, a remote client) should ask for `apiDefinition("gfx")`, which comes whole, or the application raises the budget.
+
+## Extensions: objects of your own
+
+A method is called with JSON on the GUI thread, counted, recorded and checked against its definition: right for working on the application's data. An extension is an object every run gets under a global name, called directly on the script's thread: for what is called thousands of times a second, or keeps state per run - a drawing surface, a device, a game API. `gfx` is one.
+
+```cpp
+#include "ScriptHost.h"
+
+// The object a run gets: lives on the run's thread.
+class Counter : public QObject
+{
+    Q_OBJECT
+public:
+    explicit Counter(const ScriptHost::ScriptRunContext& context) : m_context(context) {}
+    Q_INVOKABLE int next() { return ++m_n; }
+    Q_INVOKABLE void reset(int to)
+    {
+        if (to < 0)
+            m_context.throwError("counter.reset: the value must not be negative");
+        else
+            m_n = to;
+    }
+private:
+    ScriptHost::ScriptRunContext m_context;
+    int m_n = 0;
+};
+
+class CounterExtension : public ScriptHost::ScriptExtension
+{
+public:
+    CounterExtension() : ScriptExtension("counter") {}
+    QStringList members() const override { return {"next", "reset"}; }     // for check()
+    QString declaration() const override                                   // for apiDefinition()
+    {
+        return "declare namespace counter {\n"
+               "  /** The next number, from 1. */\n  function next(): number;\n"
+               "  function reset(to: number): void;\n}\n";
+    }
+    QObject* createRunObject(const ScriptHost::ScriptRunContext& context) override
+    {
+        return new Counter(context);
+    }
+};
+
+engine->addExtension(QSharedPointer<CounterExtension>::create());
+```
+
+```js
+log(counter.next(), counter.next());     // 1 2
+```
+
+The script calls the object's `Q_INVOKABLE` functions and reads its properties. Unlike a method's, such a call is not counted toward `maxCalls`, not recorded in `calls`, not stopped at by the debugger, and not checked for being read-only.
+
+### Threads and ownership
+
+| | Runs on |
+|---|---|
+| `members()`, `declaration()` | The GUI thread, each time `check()` or `apiDefinition()` runs. They may change; emit `changed()` when they do, and the engine emits `methodsChanged()` |
+| `createRunObject(context)`, `glue()` | The run's thread, when the run starts, before the body. Runs start side by side: both must be safe against each other and against the GUI thread |
+| The per-run object | The run's thread. The run owns it and deletes it there when the script is over, while the run's JavaScript engine still exists. Return it without a parent |
+| `runEnded(id)` | The GUI thread, once per run that had the extension, on every end, after the per-run object is gone and before `runFinished` |
+
+The engine and every run that has the extension hold a reference to it: `removeExtension(name)` while runs go on is safe; they keep it, new runs go without it.
+
+`glue()` may return a JavaScript function that takes the per-run object and returns what the script sees under the name - for defaults, overloads or plain JavaScript helpers:
+
+```js
+(function (native) { return { next: function () { return native.next(); }, twice: function () { return native.next() * 2; } }; })
+```
+
+### The run context
+
+The `ScriptRunContext` passed to `createRunObject` is the way back into the run. Keep a copy in the per-run object; a copy stays safe after the run ended.
+
+| `ScriptRunContext` | |
+|---|---|
+| `runId()`, `isRequested()`, `isDryRun()`, `isActive()` | Any thread. `isActive()` is false once the script is over |
+| `throwError(message)` | The run's thread, in a call from the script: throws a JavaScript `Error` once the call returns |
+| `log(text)` | The run's thread: a line in the run's log |
+| `schedule(key, callback)` | Any thread: runs `callback` on the run's thread, once the body has returned, between timers and events like an event handler. False when the run is over |
+| `call(fn, args)` | The run's thread, in a scheduled callback: calls a script function; an exception it throws ends the run as `runtime` |
+| `setKeepAlive(key, keep)` | Any thread: while any key is held, the run goes on after its body, like a run with a timer |
+
+**Coalescing.** With a key, at most one callback per key waits: a newer one replaces the waiting one. A tick from the application that the script cannot keep up with is then skipped, not queued - this is how `gfx.onFrame` skips frames. An empty key queues every callback. A callback still waiting when the run ends is dropped on the run's thread, before the per-run object is deleted, so it may hold a plain pointer to that object. Do not capture `QJSValue`s in a callback: keep them in the per-run object.
+
+```cpp
+// GUI side: a tick for every run that asked for ticks
+for (const Ticked& run : m_runs)
+    run.context.schedule("tick", [object = run.object]() { object->tick(); });
+
+// the per-run object, on the run's thread
+void Ticker::tick() { m_context.call(m_handler, {QJSValue(m_count++)}); }
+```
+
+**Keep-alive.** A script that registers a handler with an extension (`gfx.onFrame(fn)`) expects to go on after its body: the per-run object calls `setKeepAlive("handler", true)`, and `false` when the handler is removed. A pending scheduled callback keeps the run alive by itself until it ran.
+
+### Switches, requested runs and dry runs
+
+```cpp
+engine->setExtensionEnabled("counter", false);              // durable, by name; default enabled
+engine->allowExtensionForRequestedRuns("counter");          // requested runs get none by default
+```
+
+A disabled extension is not in new runs nor in `apiDefinition()`, and `check()` rejects a use of it. A requested run gets only the extensions allowed for it; `check(code, true)` checks as such a run. `extensions()` lists the names added.
+
+`check()` validates every `name.member` against `members()` with a "did you mean"; nested members are given dotted (`"draw.star"`, `"ease.outQuad"`). `check()` and the syntax check never create a per-run object. A dry run does, with `context.isDryRun()` true: the per-run object must then leave the application's data alone - drawing on an overlay, or answering, is fine.
+
+An extension's name is a global of its own: `addExtension()` refuses, with a warning, a name that is not an identifier or that a method has or starts with (`db` while `db.read` is registered). Keep extension names and the name spaces of methods apart. Adding a name again replaces the extension; runs already going keep the one they started with.
 
 ## Requested runs
 
@@ -686,6 +1046,8 @@ What the sections above did not need.
 | `postEvent(name, data)`, `postEvent(id, name, data)` | An event for every run with a handler for `name`, or for the one run. See [Events](#events-keys-mouse-and-your-own) |
 | `allowEventForRequestedRuns(name, allow)`, `isEventAllowedForRequestedRuns(name)` | Which events requested runs get. See [Requested runs get no events](#requested-runs-get-no-events) |
 | `callingRun()` | In a method's handler: the run that called it; 0 elsewhere |
+| `addExtension(extension)`, `removeExtension(name)`, `extensions()` | Objects of the application in every new run. See [Extensions](#extensions-objects-of-your-own) |
+| `setExtensionEnabled(name, bool)`, `allowExtensionForRequestedRuns(name, allow)` | Which runs get an extension |
 
 | `ScriptMethod` | |
 |---|---|
@@ -723,6 +1085,16 @@ What the sections above did not need.
 |---|---|
 | `useApprovalDialog(engine, parent)` | Installs the approval dialog as the engine's approval handler. See [Approval](#approval) |
 | `forwardInput(engine, widget)` | Posts the widget's keys and clicks as events, registers `input.mouse()`; returns the forwarder, delete it to stop. See [Keys and the mouse](#keys-and-the-mouse-forwardinput) |
+| `attachCanvas(engine, target)` | A canvas over `target`: `gfx` for new runs; returns the `ScriptCanvas`, delete it to detach. See [the canvas](#drawing-over-the-window-the-canvas) |
+
+| `ScriptCanvas` | |
+|---|---|
+| `addImage(name, image)`, `removeImage(name)`, `images()` | Images scripts draw by name. See [Images](#images) |
+| `addDrawFunction(name, painter, declaration, bounds)`, `removeDrawFunction(name)`, `drawFunctions()` | `gfx.draw.<name>`. See [Drawing functions of the application](#drawing-functions-of-the-application) |
+| `setAllowedForRequestedRuns(bool)`, `isAllowedForRequestedRuns()` | `gfx` and `"resize"` for requested runs |
+| `layers()` | The runs with a layer, in paint order |
+| `target()`, `engine()` | |
+| Signal `presented(id, dirty)` | A run's frame reached the canvas; `dirty` is the area repainted for it |
 
 Every control of the two widgets and of the approval dialog has an object name that starts with `scripthost_`, for tests and for tools that address widgets by name. The lists are in the headers.
 
@@ -739,6 +1111,14 @@ Every `run*` signal names its run first.
 | `runPaused(id, line, method, arguments, variables)`, `runCallFinished(id, line, method, arguments, value, error)` | Debugger |
 | `runsChanged()` | `runs()` changed |
 | `enabledChanged(bool)`, `methodsChanged()`, `settingsChanged()` | Switches and locks |
+
+## New in 2.2
+
+Nothing breaks; 2.2 adds drawing and extensions:
+
+- [The canvas](#drawing-over-the-window-the-canvas) (ScriptHostWidgets): `attachCanvas(engine, widget)` gives scripts `gfx` - shapes, text, paths, gradients, transforms, images, shapes that follow widgets, a frame loop and helpers for games, and drawing functions of the application.
+- [Extensions](#extensions-objects-of-your-own): `ScriptExtension` and `addExtension()` add an object of the application to every run, called on the script's thread.
+- Events and the callbacks of an extension take turns, so a frame loop cannot hold back keys and clicks.
 
 ## New in 2.1
 

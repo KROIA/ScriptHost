@@ -18,6 +18,7 @@ public:
 private:
     void setUpScripting();
     void registerMethods();
+    void setUpCanvas();
     void buildToolBar();
 
     void openScripts();
@@ -32,6 +33,7 @@ private:
     QTableWidget*   m_table = nullptr;
     QPlainTextEdit* m_log = nullptr;
     QLabel*         m_input = nullptr;
+    QWidget*        m_field = nullptr;
 
     ScriptHost::ScriptEngine*  m_engine = nullptr;
     ScriptHost::ScriptLibrary* m_library = nullptr;
