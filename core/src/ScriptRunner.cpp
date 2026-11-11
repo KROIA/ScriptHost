@@ -24,18 +24,16 @@ const char* const kScriptFile = "script";
 // make(name, trace): the function a script calls for a method. Arguments and
 // result cross to the application as JSON text, which works the same in every
 // Qt version and needs no shared objects between the threads.
-// run(fn, argsJson): calls the script and reports what happened as JSON text -
-// a `throw "text"` is otherwise indistinguishable from a returned string.
+// run(fn, argsJson): calls the script; a return gives [done, result as JSON
+// text], and anything else is what the script threw (see failure()). There is
+// no try/catch here: Qt 5.15 asserts ("hasException") when a stop interrupts
+// compiled code inside a try block, and these functions are called often
+// enough to be compiled (I-016).
 const char* const kPrelude = R"JS((function(native){
     var handlers = {};      // event name -> [fn, ...]
-    var thrown = function(e){
-        var o = e !== null && typeof e === 'object';
-        return JSON.stringify({
-            e: o && e.message !== undefined ? String(e.message) : String(e),
-            n: o && e.name ? String(e.name) : '',
-            s: o && e.stack ? String(e.stack) : ''});
-    };
+    var done = {};          // marks a return; a script cannot throw it
     return {
+        done: done,
         make: function(name, trace){
             return function(){
                 var r = JSON.parse(native.call(name,
@@ -97,22 +95,14 @@ const char* const kPrelude = R"JS((function(native){
             return JSON.stringify(out);
         },
         run: function(fn, argsJson){
-            try {
-                var v = fn(JSON.parse(argsJson));
-                return JSON.stringify({v: v === undefined ? null : v, u: v === undefined});
-            } catch (e) {
-                return thrown(e);
-            }
+            var v = fn(JSON.parse(argsJson));
+            return [done, JSON.stringify({v: v === undefined ? null : v, u: v === undefined})];
         },
         // An extension calls a script function (ScriptRunContext::call).
         apply: function(fn, a){
-            try {
-                if (typeof fn !== 'function') throw new TypeError('not a function');
-                fn.apply(undefined, a);
-                return '{}';
-            } catch (e) {
-                return thrown(e);
-            }
+            if (typeof fn !== 'function') throw new TypeError('not a function');
+            fn.apply(undefined, a);
+            return [done, '{}'];
         }
     };
 }))JS";
@@ -165,6 +155,27 @@ void resolveMembers(const QJSValue& wrapped, const QMetaObject* metaObject)
         wrapped.property(QString::fromLatin1(metaObject->method(i).name()));
     for (int i = 0; i < metaObject->propertyCount(); ++i)
         wrapped.property(QString::fromLatin1(metaObject->property(i).name()));
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    // Qt 5.15 also fills a method's argument types on its first call,
+    // unguarded, and a run on another thread could read them half filled: a
+    // wrong type, and a crash (I-016). A call without arguments fills them and
+    // fails before the method runs. A name with an overload that takes none
+    // would run, so it is left out.
+    // ponytail: such a name stays unguarded; Qt's private QQmlMetaObject
+    // could fill it without a call, if an extension ever needs one.
+    QHash<QByteArray, int> fewest;      // method name -> fewest parameters
+    for (int i = 0; i < metaObject->methodCount(); ++i) {
+        const QMetaMethod method = metaObject->method(i);
+        const auto it = fewest.constFind(method.name());
+        fewest[method.name()] = it == fewest.cend() ? method.parameterCount()
+                                                     : qMin(it.value(), method.parameterCount());
+    }
+    for (auto it = fewest.cbegin(); it != fewest.cend(); ++it) {
+        QJSValue method = wrapped.property(QString::fromLatin1(it.key()));
+        if (it.value() > 0 && method.isCallable())
+            method.callWithInstance(wrapped);
+    }
+#endif
 }
 
 // What a script sees of an extension with members switched off
@@ -289,6 +300,7 @@ void ScriptRunner::run()
         m_stepScope = QJSValue();       // these belong to the engine that ends here
         m_formatVariables = QJSValue();
         m_apply = QJSValue();
+        m_done = QJSValue();
         m_timers.clear();
         QMutexLocker lock(&m_engineMutex);
         m_engine = nullptr;
@@ -425,9 +437,11 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         object.setProperty(method.name.mid(dot + 1), callable);
     }
     m_apply = prelude.property(QStringLiteral("apply"));
+    m_done = prelude.property(QStringLiteral("done"));
     const QJsonObject notInstalled = installExtensions(engine);
+    // A stop interrupts the glue too: then the run was stopped, it did not fail.
     if (!notInstalled.isEmpty())
-        return notInstalled;
+        return stopRequested(&reason) ? stoppedResult(reason) : notInstalled;
 
     QJsonObject payload;
     const QJsonObject failed = failure(runFunction.call({function, m_config.argsJson}), payload);
@@ -606,26 +620,25 @@ bool ScriptRunner::callScript(const QJSValue& fn, const QJSValueList& args)
 
 QJsonObject ScriptRunner::failure(const QJSValue& outcome, QJsonObject& payload) const
 {
-    QString reason;
-    if (stopRequested(&reason) && (outcome.isError() || !outcome.isString()))
-        return stoppedResult(reason);
-    if (outcome.isError() || !outcome.isString()) {
-        return {{"status", "error"}, {"phase", "runtime"},
-                {"message", outcome.toString()}};
-    }
-
-    payload = QJsonDocument::fromJson(outcome.toString().toUtf8()).object();
-    if (!payload.contains(QStringLiteral("e")))
+    if (outcome.property(0).strictlyEquals(m_done)) {
+        payload = QJsonDocument::fromJson(outcome.property(1).toString().toUtf8()).object();
         return QJsonObject();
+    }
     // A stop makes the pending call fail; that failure is not the news.
+    QString reason;
     if (stopRequested(&reason))
         return stoppedResult(reason);
-    QString message = payload.value(QStringLiteral("e")).toString();
-    const QString name = payload.value(QStringLiteral("n")).toString();
+    // Thrown: an Error, or any other value (`throw "text"`).
+    const QJSValue messageValue = outcome.property(QStringLiteral("message"));
+    QString message = outcome.isObject() && !messageValue.isUndefined() ? messageValue.toString()
+                                                                          : outcome.toString();
+    const QJSValue nameValue = outcome.property(QStringLiteral("name"));
+    const QString name = outcome.isObject() && nameValue.toBool() ? nameValue.toString() : QString();
+    const QJSValue stack = outcome.property(QStringLiteral("stack"));
     if (!name.isEmpty() && name != QLatin1String("Error"))
         message = name + QStringLiteral(": ") + message;
     QJsonObject result{{"status", "error"}, {"phase", "runtime"}, {"message", message}};
-    const QList<int> lines = scriptLines(payload.value(QStringLiteral("s")).toString());
+    const QList<int> lines = scriptLines(outcome.isObject() && stack.toBool() ? stack.toString() : QString());
     if (!lines.isEmpty())
         result["line"] = lines.first();
     if (name == QLatin1String("ReferenceError"))

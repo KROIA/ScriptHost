@@ -21,6 +21,7 @@ public:
     {
         ADD_TEST(TST_ScriptExtensions::testExtensionInScriptsCheckAndDefinition);
         ADD_TEST(TST_ScriptExtensions::testGlue);
+        ADD_TEST(TST_ScriptExtensions::testFirstCallsAtOnce);
         ADD_TEST(TST_ScriptExtensions::testDidYouMeanOnMembers);
         ADD_TEST(TST_ScriptExtensions::testCallsAreNotMethodCalls);
         ADD_TEST(TST_ScriptExtensions::testThrowErrorAndLog);
@@ -28,6 +29,7 @@ public:
         ADD_TEST(TST_ScriptExtensions::testCoalescedScheduling);
         ADD_TEST(TST_ScriptExtensions::testExceptionInScheduledCall);
         ADD_TEST(TST_ScriptExtensions::testKeepAliveAndStop);
+        ADD_TEST(TST_ScriptExtensions::testStopWhileStarting);
         ADD_TEST(TST_ScriptExtensions::testRequestedRunsNeedTheOptIn);
         ADD_TEST(TST_ScriptExtensions::testEnableSwitch);
         ADD_TEST(TST_ScriptExtensions::testMemberSwitch);
@@ -67,6 +69,33 @@ private:
             out.result = r;
             out.done = true;
         });
+    }
+
+    // Several runs call methods at once, for the first time in the process.
+    // Qt 5.15 fills a method's argument types on its first call, unguarded,
+    // and the runs share them: a run got a wrong type and crashed (I-016).
+    // A race, so not certain: before the fix it crashed 5 suite runs of 5.
+    TEST_FUNCTION(testFirstCallsAtOnce)
+    {
+        TEST_START;
+
+        Engine engine;
+        engine.addExtension(QSharedPointer<FirstCallExtension>::create());
+        FirstCallProbe::arrived = 0;
+        FirstCallProbe::expected = 8;
+        QString code = "first.together();\n";
+        for (int i = 0; i < 32; ++i)
+            code += QString("if (first.s%1([%1]) !== %1) throw new Error('s%1');\n").arg(i);
+        code += "return 1;";
+        int done = 0, ok = 0;
+        for (int i = 0; i < 8; ++i) {
+            engine.run(code, Engine::RunOptions(), [&](const QJsonObject& r) {
+                ++done;
+                ok += r["status"].toString() == "ok";
+            });
+        }
+        TEST_ASSERT(TestSupport::spin([&]() { return done == 8; }));
+        TEST_COMPARE(ok, 8);
     }
 
     static QSharedPointer<TestExtension> addExtension(Engine& engine)
@@ -396,6 +425,32 @@ private:
         TEST_COMPARE(out.result["phase"].toString(), QString("runtime"));
         TEST_COMPARE(out.result["message"].toString(), QString("tick 7"));
         TEST_COMPARE(out.result["line"].toInt(), 2);
+    }
+
+    TEST_FUNCTION(testStopWhileStarting)
+    {
+        TEST_START;
+
+        // The stop comes while the run installs the extension: the glue that
+        // follows is interrupted. The run was stopped; it did not fail.
+        Engine engine;
+        auto extension = QSharedPointer<TestExtension>::create("ext", "(function (o) { return o; })");
+        std::atomic<bool> entered{false};
+        std::atomic<bool> release{false};
+        extension->beforeCreate = [&]() {
+            entered = true;
+            QDeadlineTimer deadline(10000);
+            while (!release && !deadline.hasExpired())
+                QThread::yieldCurrentThread();
+        };
+        engine.addExtension(extension);
+        Outcome out;
+        const Engine::RunId id = start(engine, "return 1;", out);
+        TEST_ASSERT(TestSupport::spin([&]() { return entered.load(); }));
+        engine.stop(id);
+        release = true;
+        TEST_ASSERT(TestSupport::spin([&]() { return out.done; }));
+        TEST_COMPARE(out.result["phase"].toString(), QString("cancelled"));
     }
 
     TEST_FUNCTION(testKeepAliveAndStop)

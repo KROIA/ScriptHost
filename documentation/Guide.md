@@ -277,6 +277,8 @@ A run that never ends does not grow: it keeps only the latest `maxLogLines` line
 
 Other runs go on. What the script changed before stays changed.
 
+**With a Debug build of Qt** (seen with Qt 5.15.2 and 6.11.1), a stop that lands inside a `try` block of the script can trip Qt's assertion `"hasException"` in `qv4engine.cpp` and end the application. It takes a function that Qt has compiled because it runs often, such as a frame handler or a timer's function, busy inside its own `try` / `catch` when the stop comes. This is a limit of Qt: Release builds of Qt are not affected, and ScriptHost's own code around the script's callbacks has no `try`.
+
 In the widgets: the Runs tab of the Scripts window lists the active runs, each with a Stop button - a selected one shows its run id, arguments, code and its log as it is written; the editor's Stop button stops only the run that editor started, and closing the editor stops it.
 
 ### The language

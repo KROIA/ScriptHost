@@ -144,8 +144,8 @@ protected:
 
 private:
     QJsonObject execute(QJSEngine& engine);
-    // The error result of a call through the prelude's run(); empty when the
-    // function returned, `payload` then holding what it returned.
+    // The error result of a call through the prelude's run() or apply();
+    // empty when the function returned, `payload` then holding what it returned.
     QJsonObject failure(const QJSValue& outcome, QJsonObject& payload) const;
     bool stopRequested(QString* reason = nullptr) const;
     bool waitWhilePaused(int line, const QString& name, const QString& argsJson);
@@ -177,6 +177,7 @@ private:
     // Extensions.
     QList<QObject*>             m_extensionObjects; // the per-run objects, owned
     QJSValue                    m_apply;            // prelude: calls a function for callScript()
+    QJSValue                    m_done;             // prelude: marks a return of run() and apply()
     QJsonObject                 m_failure;          // what callScript() met; ends the run
     // Statement stepping.
     bool                        m_instrumented = false;

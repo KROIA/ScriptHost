@@ -39,6 +39,7 @@ public:
         ADD_TEST(TST_ScriptConcurrency::testStopDuringTimerWait);
         ADD_TEST(TST_ScriptConcurrency::testStopDuringAsyncCall);
         ADD_TEST(TST_ScriptConcurrency::testStopDuringPureLoop);
+        ADD_TEST(TST_ScriptConcurrency::testStopInsideARepeatedCallback);
         ADD_TEST(TST_ScriptConcurrency::testSignalsCarryTheRunId);
         ADD_TEST(TST_ScriptConcurrency::testLogKeepsTheLatestLines);
         ADD_TEST(TST_ScriptConcurrency::testPrintAndConsoleLogAreLog);
@@ -592,6 +593,24 @@ private:
         QJsonObject result;
         const qint64 ms = stopWhenReady(engine, "log('ready');\nlet n = 0;\nwhile (true) { n++; }\n",
                                         [&]() { return ready; }, result);
+        TEST_ASSERT(ms >= 0 && ms < 2000);
+        TEST_COMPARE(result["phase"].toString(), QString("cancelled"));
+    }
+
+    TEST_FUNCTION(testStopInsideARepeatedCallback)
+    {
+        TEST_START;
+
+        // The stop lands in a timer's function after enough calls that Qt
+        // compiled the code that calls it: Qt 5.15 asserted ("hasException")
+        // when that code had a try/catch (I-016).
+        Engine engine;
+        bool ready = false;
+        QObject::connect(&engine, &Engine::runLog, [&]() { ready = true; });
+        QJsonObject result;
+        const qint64 ms = stopWhenReady(engine,
+            "let n = 0;\nsetInterval(() => { if (++n === 20) { log('ready'); while (true) {} } }, 1);\n",
+            [&]() { return ready; }, result);
         TEST_ASSERT(ms >= 0 && ms < 2000);
         TEST_COMPARE(result["phase"].toString(), QString("cancelled"));
     }

@@ -9,6 +9,7 @@
 
 #include "ScriptHost.h"
 #include <QCoreApplication>
+#include <QDeadlineTimer>
 #include <QJSValue>
 #include <QList>
 #include <QMap>
@@ -16,8 +17,81 @@
 #include <QMutexLocker>
 #include <QObject>
 #include <QThread>
+#include <QVector>
+#include <atomic>
+#include <functional>
 
 class TestExtension;
+
+// `first`: methods that no other test calls, so that
+// TST_ScriptExtensions::testFirstCallsAtOnce makes their first calls in the
+// process (I-016).
+class FirstCallProbe : public QObject
+{
+    Q_OBJECT
+public:
+    // Waits until `expected` runs are here, so that they call at once.
+    Q_INVOKABLE void together() const
+    {
+        ++arrived;
+        QDeadlineTimer deadline(5000);
+        while (arrived < expected && !deadline.hasExpired())
+            QThread::yieldCurrentThread();
+    }
+    Q_INVOKABLE double s0(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s1(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s2(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s3(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s4(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s5(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s6(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s7(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s8(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s9(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s10(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s11(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s12(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s13(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s14(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s15(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s16(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s17(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s18(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s19(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s20(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s21(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s22(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s23(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s24(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s25(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s26(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s27(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s28(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s29(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s30(const QVector<double>& v) const { return v.value(0); }
+    Q_INVOKABLE double s31(const QVector<double>& v) const { return v.value(0); }
+
+    static inline std::atomic<int> arrived{0};
+    static inline int              expected = 0;
+};
+
+class FirstCallExtension : public ScriptHost::ScriptExtension
+{
+public:
+    FirstCallExtension()
+        : ScriptExtension("first")
+    {
+    }
+    QStringList members() const override
+    {
+        QStringList names{"together"};
+        for (int i = 0; i < 32; ++i)
+            names << QString("s%1").arg(i);
+        return names;
+    }
+    QString declaration() const override { return "declare namespace first {}\n"; }
+    QObject* createRunObject(const ScriptHost::ScriptRunContext&) override { return new FirstCallProbe; }
+};
 
 class ExtensionProbe : public QObject
 {
@@ -82,6 +156,8 @@ public:
     }
     QObject* createRunObject(const ScriptHost::ScriptRunContext& context) override
     {
+        if (beforeCreate)
+            beforeCreate();
         auto* probe = new ExtensionProbe(context, this);
         QMutexLocker lock(&m_mutex);
         ++created;
@@ -124,6 +200,9 @@ public:
                 slot.probe = nullptr;
         }
     }
+
+    // Called on the worker thread as a run installs the extension.
+    std::function<void()> beforeCreate;
 
     // Under the mutex, or read when no run is active.
     int          created = 0;

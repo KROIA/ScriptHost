@@ -49,6 +49,7 @@ public:
         ADD_TEST(TST_ScriptCanvas::testWidgetRect);
         ADD_TEST(TST_ScriptCanvas::testFrameLoop);
         ADD_TEST(TST_ScriptCanvas::testFrameLoopCoalesces);
+        ADD_TEST(TST_ScriptCanvas::testStopInsideAFrame);
         ADD_TEST(TST_ScriptCanvas::testHelpers);
         ADD_TEST(TST_ScriptCanvas::testDrawFunctions);
         ADD_TEST(TST_ScriptCanvas::testMemberSwitches);
@@ -829,6 +830,33 @@ private:
         TEST_COMPARE(logs.size(), 1);
         TEST_ASSERT(logs.value(0).startsWith("tiny "));
         TEST_ASSERT(logs.value(0).mid(5).toInt() <= 3);
+    }
+
+    TEST_FUNCTION(testStopInsideAFrame)
+    {
+        TEST_START;
+
+        // A stop while a frame runs, after enough frames that Qt compiled the
+        // code that calls the handler: Qt 5.15 asserted ("hasException") when
+        // that code had a try/catch (I-016).
+        Field field;
+        Outcome out;
+        const Engine::RunId id = field.engine.run(
+            "let n = 0;\n"
+            "gfx.onFrame(dt => {\n"
+            "    gfx.clear();\n"
+            "    gfx.present();\n"
+            "    if (++n === 20) { log('ready'); while (true) {} }\n"
+            "});",
+            Options(), [&out](const QJsonObject& r) {
+                out.result = r;
+                out.done = true;
+            });
+        TEST_ASSERT(TestSupport::spin([&]() { return field.logs.value(id).contains("ready"); }));
+        TestSupport::spin([]() { return false; }, 50);
+        field.engine.stop(id);
+        TEST_ASSERT(TestSupport::spin([&]() { return out.done; }));
+        TEST_COMPARE(out.result["phase"].toString(), QString("cancelled"));
     }
 
     TEST_FUNCTION(testHelpers)
