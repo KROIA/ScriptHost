@@ -10,6 +10,7 @@
 //   7. Show what scripts do (signals), and offer the user the widgets.
 //   8. Hand the user's keys and clicks to scripts that ask for them.
 //   9. Let scripts draw over the window: highlights, and a small game.
+//  10. Let scripts read and change the window, and build dialogs of their own.
 //
 // Everything else - checking a script before it runs, limits, the approval
 // dialog, the Scripts window with its editor and debugger - comes from the
@@ -45,6 +46,8 @@ const char* const kMonitorScript = "Stock monitor";
 const char* const kInputScript = "Input logger";
 const char* const kHighlightScript = "Highlight a widget";
 const char* const kGameScript = "Paddle game";
+const char* const kRearrangeScript = "Rearrange the window";
+const char* const kLookUpScript = "Look up an item";
 
 // ---- Helpers for the table: the application's own data, nothing ScriptHost-specific
 
@@ -229,6 +232,15 @@ void InventoryWindow::setUpScripting()
 
     // ---- 9. Drawing over the window ---------------------------------------
     setUpCanvas();
+
+    // ---- 10. The window's widgets -----------------------------------------
+    // Scripts get the `ui` methods (group "UI"): they read the widget tree,
+    // change it (ui.restore() undoes what a run changed), build dialogs and
+    // get their signals as events. They see this window and what lies below
+    // it, and never ScriptHost's own widgets: the canvas, the editor, the
+    // Scripts panel and the approval dialog. Each tool is a method like any
+    // other, switched off with setMethodEnabled("ui.create", false).
+    ScriptHost::exposeWidgets(m_engine, this);
 }
 
 // A canvas over the whole window: scripts get the global `gfx` and draw on
@@ -389,6 +401,10 @@ void InventoryWindow::buildToolBar()
         m_field->setFocus();    // the keys go to the field
     });
     bar->addSeparator();
+    // Both wait - for a timer, for the user - so they run until stopped.
+    bar->addAction(QString("Run '%1'").arg(kRearrangeScript), this, [this]() { runUntilStopped(kRearrangeScript); });
+    bar->addAction(QString("Run '%1'").arg(kLookUpScript), this, [this]() { runUntilStopped(kLookUpScript); });
+    bar->addSeparator();
     bar->addAction("Request a script", this, [this]() { requestScript(); });
 }
 
@@ -410,6 +426,10 @@ void InventoryWindow::openScripts()
         // The user's choices outlive the session (see step 6).
         connect(scripts, &ScriptHost::ScriptsWidget::changed, this, [this]() { saveScriptSettings(); });
         layout->addWidget(scripts);
+        // The panel in it is hidden from scripts as ScriptHost's own; its
+        // frame is the application's. Hidden too, so that scripts do not see
+        // an empty window.
+        ScriptHost::ScriptUi::hideWidget(m_scriptsWindow);
     }
     m_scriptsWindow->show();
     m_scriptsWindow->raise();

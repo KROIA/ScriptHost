@@ -4,9 +4,9 @@ A Qt library that makes a C++ application scriptable in JavaScript. The applicat
 
 A script can call exactly the registered methods. The JavaScript engine (`QJSEngine`) has no file, network or process access of its own.
 
-Two libraries: **ScriptHost**, the engine (Qt Core + Qml, no GUI), and **ScriptHostWidgets** on top of it (the Scripts window, the editor with its debugger, the approval dialog, a canvas scripts draw on).
+Two libraries: **ScriptHost**, the engine (Qt Core + Qml, no GUI), and **ScriptHostWidgets** on top of it (the Scripts window, the editor with its debugger, the approval dialog, a canvas scripts draw on, and the `ui` methods for the application's own widgets).
 
-Version 2.0 breaks the 1.x API (run ids, the widgets split off); see [Migrating from 1.x to 2.0](documentation/Guide.md#migrating-from-1x-to-20). Version 2.1 adds events: keys, mouse clicks and the application's own ([New in 2.1](documentation/Guide.md#new-in-21)). Version 2.2 adds a canvas for scripts and extensions of the application's own ([New in 2.2](documentation/Guide.md#new-in-22)).
+Version 2.0 breaks the 1.x API (run ids, the widgets split off); see [Migrating from 1.x to 2.0](documentation/Guide.md#migrating-from-1x-to-20). Version 2.1 adds events: keys, mouse clicks and the application's own ([New in 2.1](documentation/Guide.md#new-in-21)). Version 2.2 adds a canvas for scripts and extensions of the application's own ([New in 2.2](documentation/Guide.md#new-in-22)). Version 2.3 lets scripts read, change and extend the application's widgets ([New in 2.3](documentation/Guide.md#new-in-23)).
 
 ## Quick start
 
@@ -34,7 +34,7 @@ const ScriptHost::ScriptEngine::RunId id =
 // engine->stop(id) ends it early.
 ```
 
-`examples/LibraryExample` is a small inventory application that uses everything below, commented in the order an application sets it up, including a stock monitor that runs on a `setInterval` timer until it is stopped, an input logger that reacts to keys and clicks, a script that highlights a widget and a small paddle game on the canvas. `examples/ConsoleExample` uses the engine alone, in a `QCoreApplication`.
+`examples/LibraryExample` is a small inventory application that uses everything below, commented in the order an application sets it up, including a stock monitor that runs on a `setInterval` timer until it is stopped, an input logger that reacts to keys and clicks, a script that highlights a widget, a small paddle game on the canvas, and scripts that print, rearrange and extend the window through `ui`. `examples/ConsoleExample` uses the engine alone, in a `QCoreApplication`.
 
 ## Features
 
@@ -46,12 +46,13 @@ const ScriptHost::ScriptEngine::RunId id =
 - **Events**: a script subscribes with `on(name, fn)`; the application posts with `postEvent(name, data)` - a tick, a sensor value, anything. `forwardInput(engine, widget)` (ScriptHostWidgets) turns a widget's keys and mouse clicks into `"key"` and `"mouse"` events, and `input.mouse()` reads the pointer. Handlers run after the script's body has returned, between its timers. Requested runs get no events unless the application allows them per name.
 - **Drawing** (ScriptHostWidgets): `attachCanvas(engine, widget)` gives scripts `gfx`, a transparent canvas over the widget - shapes, text, paths, gradients, transforms, images of the application, shapes that follow a named widget, a frame loop (`gfx.onFrame`) and helpers for games. Recorded on the script's thread and painted in one go: thousands of moving shapes per frame. The application adds drawing functions of its own (`addDrawFunction`). See [the canvas](documentation/Guide.md#drawing-over-the-window-the-canvas).
 - **Extensions**: `ScriptExtension` adds an object of the application to every run, called directly on the script's thread - for what is called too often for a method, or keeps state per run. See [Extensions](documentation/Guide.md#extensions-objects-of-your-own).
+- **The application's widgets** (ScriptHostWidgets): `exposeWidgets(engine, mainWindow)` gives scripts `ui`. They read the widget tree (`ui.tree`, `ui.find`, `ui.info`), change widgets and layouts and undo it with `ui.restore()`, build a dialog in one call (`ui.create`, `ui.exec`), and get widget signals as events (`on(ui.connect(button, 'clicked'), fn)`). Password text stays unreadable, the application hides what scripts must not see, and every tool can be switched off. See [Reading and changing the UI](documentation/Guide.md#reading-and-changing-the-ui).
 - **Output**: `log()`, `print()` and `console.log()` lines arrive as `runLog` and, with `setOutput(device)`, on any `QIODevice` (stdout, a file, a socket).
 - **Limits**: run time, total method calls, calls per method (`setMaxCallsPerRun`), log lines, runs at once.
 - **Dry run**: read-only methods run, changing ones are only recorded.
 - **Requested runs** (`requestRun`) for other programs: a master switch, a requester name the user sees, approval by the user per kind of script (new or saved, reading or changing, dry run), through the application's own handler or the dialog of ScriptHostWidgets (`useApprovalDialog`: run, test run, decline with a reason).
 - **Saved scripts** in `.js` files with a small header; shipped read-only folders next to the user's folder.
-- **Per-method switches** and locks: what scripts may call, and what the user may change. The user's choices as JSON for the application to store.
+- **Switches** per method, method group, extension and extension member, and locks: what scripts may use, and what the user may change. See [Switching functions off](documentation/Guide.md#switching-functions-off). The user's choices as JSON for the application to store.
 - **Widgets** (ScriptHostWidgets): `ScriptsWidget` (switches, saved scripts, methods, the active runs with a Stop button each, runs of the session) and `ScriptEditorDialog` (editor with method reference, check, run, dry run, and a debugger that steps statement by statement or from method call to method call, with breakpoints and the variables at each stop).
 - **Definition** of the methods as TypeScript declarations (`apiDefinition`), for the editor's reference and for programs that write scripts.
 
@@ -73,6 +74,16 @@ and in the application:
 ```cpp
 ScriptHost::forwardInput(engine, gameView);                       // keys and clicks of gameView
 engine->postEvent("sensor", QJsonObject{{"temperature", 21.5}}); // an event of its own
+```
+
+A dialog, with the widgets exposed (`ScriptHost::exposeWidgets(engine, mainWindow)`):
+
+```js
+const d = ui.create({class: 'QDialog', title: 'Your name', layout: {type: 'vbox', items: [
+    {class: 'QLineEdit', name: 'name'},
+    {class: 'QDialogButtonBox', standardButtons: 'Ok|Cancel'}]}});
+if (ui.exec(d.id).accepted)                              // the script waits, the window does not
+    log('Hello ' + ui.property(d.ids.name, 'text'));
 ```
 
 Drawing, with a canvas attached (`ScriptHost::attachCanvas(engine, mainWindow)`):

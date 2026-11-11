@@ -43,14 +43,14 @@ engine->registerMethod(read, [this](const QJsonObject& args) -> QJsonValue {
 engine->run("return db.readObject('a1').name;", {}, [](const QJsonObject& result) { ... });
 ```
 
-`examples/LibraryExample` is a complete application: an inventory table with its methods, saved scripts, the Scripts window, the editor, a requested run, a stock monitor that runs until it is stopped, an input logger that reacts to keys and clicks, and a canvas with a script that highlights a widget and a small paddle game, in the order an application sets them up. `examples/ConsoleExample` is the engine alone in a `QCoreApplication`, its script's lines printed to stdout.
+`examples/LibraryExample` is a complete application: an inventory table with its methods, saved scripts, the Scripts window, the editor, a requested run, a stock monitor that runs until it is stopped, an input logger that reacts to keys and clicks, a canvas with a script that highlights a widget and a small paddle game, and three scripts that print, rearrange and extend the window through `ui` (see [Examples](#examples)), in the order an application sets them up. `examples/ConsoleExample` is the engine alone in a `QCoreApplication`, its script's lines printed to stdout.
 
 ### Two libraries
 
 | Library | Qt modules | Include | Contains |
 |---|---|---|---|
 | `ScriptHost` | Core, Qml | `ScriptHost.h` | `ScriptEngine`, `ScriptMethod`, `ScriptLibrary`, `ScriptExtension`: everything to run scripts |
-| `ScriptHostWidgets` | Core, Qml, Gui, Widgets | `ScriptHostWidgets.h` (includes `ScriptHost.h`) | `ScriptsWidget`, `ScriptEditorDialog` with its debugger, the approval dialog (`useApprovalDialog`), keys and mouse for scripts (`forwardInput`), drawing for scripts (`attachCanvas`, `ScriptCanvas`) |
+| `ScriptHostWidgets` | Core, Qml, Gui, Widgets | `ScriptHostWidgets.h` (includes `ScriptHost.h`) | `ScriptsWidget`, `ScriptEditorDialog` with its debugger, the approval dialog (`useApprovalDialog`), keys and mouse for scripts (`forwardInput`), drawing for scripts (`attachCanvas`, `ScriptCanvas`), the application's widgets for scripts (`exposeWidgets`, `ScriptUi`) |
 
 A program without windows - a service, a command-line tool - links the engine alone and needs neither Qt Gui nor Qt Widgets. In a project built from the same CMake template, `ScriptHost.cmake` in the `dependencies/` folder links both libraries; for the engine alone, set this before it is included:
 
@@ -81,6 +81,8 @@ A script can call exactly what the application registers, and the built-in metho
 A parameter is required unless `required` is passed as `false`: `addParameter` and `addRawParameter` default to `required = true`. Other libraries (QtLLM, for one) default the other way; pass the flag explicitly when porting definitions.
 
 In a script, arguments are positional in the order the parameters were added: `db.readObject("a1")`. A single object is taken as named arguments: `db.setProperty({id: "a1", name: "status", value: "archived"})`.
+
+There is one exception: when the method's first parameter has the type `object`, a single object is that first argument, and the other parameters are left out. `ui.create({class: "QLabel"})` passes the spec. Such a method cannot take named arguments, so its arguments are passed in order. **Changed in 2.3.0:** before, this held only for a method with no other parameter. A method with an `object` first parameter and more parameters took a single object as named arguments.
 
 Every call is checked against the definition first. `"5"` for a number is repaired, an enum's spelling is normalised, defaults are applied. A call that does not fit never reaches the handler; the script gets an exception that names the problem and the signature:
 
@@ -150,7 +152,7 @@ engine->setMethodGroupEnabled("Database", false);              // a method's own
 engine->setMethodUserConfigurable("db.deleteObject", false);   // the user cannot switch it either
 ```
 
-These settings are by name and durable: they may be set before the method is registered and survive registering it again. A disabled method is not in the definition, and a script that uses it is rejected before it runs. The built-in methods are switched the same way (`"log"`, `"sleep"`, `"setInterval"`).
+These settings are by name and durable: they may be set before the method is registered and survive registering it again. A disabled method is not in the definition, and a script that uses it is rejected before it runs. The built-in methods are switched the same way (`"log"`, `"sleep"`, `"setInterval"`). Extensions and their members have switches of their own; [Switching functions off](#switching-functions-off) has them all in one table.
 
 ## The definition
 
@@ -470,6 +472,8 @@ engine->allowEventForRequestedRuns("mouse");    // clicks, and input.mouse()
 ```
 
 `"mouse"` also gates `input.mouse()`: without it, the call throws `the application does not let requested scripts read the mouse`. A run keeps what was allowed when it started; `allowEventForRequestedRuns(name, false)` takes it back for later runs. `isEventAllowedForRequestedRuns(name)` asks.
+
+An allowed name also covers its family. An event name with colons, such as `"ui:7:clicked"`, reaches a requested run when the full name or its first part (`"ui"`) is allowed. So `allowEventForRequestedRuns("ui")` lets requested runs receive [widget signals](#signals-as-events). `isEventAllowedForRequestedRuns()` checks only the exact name it is given. **Changed in 2.3.0:** before, only the exact name counted. An application that allowed `"sensor"` and also posts events named like `"sensor:temperature"` now lets requested runs receive those too.
 
 Method handlers can apply the same rule: `callingRun()` is the run whose call is being handled (0 outside a handler; an asynchronous handler sees it only until it returns), and `isExternalRun(callingRun())` tells whether it is a requested one.
 
@@ -854,6 +858,291 @@ A disabled extension is not in new runs nor in `apiDefinition()`, and `check()` 
 
 An extension's name is a global of its own: `addExtension()` refuses, with a warning, a name that is not an identifier or that a method has or starts with (`db` while `db.read` is registered). Keep extension names and the name spaces of methods apart. Adding a name again replaces the extension; runs already going keep the one they started with.
 
+## Reading and changing the UI
+
+With ScriptHostWidgets, scripts can read the application's widget tree, change it, and [build dialogs of their own](#building-dialogs-from-scripts). One call sets it up:
+
+```cpp
+#include "ScriptHostWidgets.h"
+
+ScriptHost::ScriptUi* ui = ScriptHost::exposeWidgets(engine, mainWindow);   // a child of mainWindow
+```
+
+```js
+const ok = ui.find({class: 'QPushButton', text: 'OK'})[0];
+log(ui.info(ok.id).sizeHint.width);
+ui.setProperty(ok.id, 'text', 'Apply');
+setTimeout(() => ui.restore(), 3000);        // as it was, three seconds later
+```
+
+The tools are ordinary [methods](#the-methods-a-script-can-call) named `ui.*`, in the group `UI`. They are checked against their definitions, count toward the call limits, appear in the Scripts window and in the definition, and each can be switched off on its own (see [Switching functions off](#switching-functions-off)). The reading tools are read-only; the others are not, which matters for [dry runs](#dry-run) and for [approval](#approval).
+
+One `ScriptUi` serves one engine: calling `exposeWidgets()` again on the same engine moves the `ui` methods to the new root. Deleting the `ScriptUi` unregisters them. Like the engine, it is used on the GUI thread only.
+
+### What scripts see
+
+Scripts see the root and every widget below it, including child windows such as dialogs, and nothing else. They never see:
+
+- ScriptHost's own widgets: the canvas, the script editor, the Scripts panel, the approval dialog, and classes derived from them.
+- A widget the application hid, and everything below it:
+
+```cpp
+ScriptHost::ScriptUi::hideWidget(settingsPanel);          // or the dynamic property "scripthost_hidden" = true
+ScriptHost::ScriptUi::hideWidget(settingsPanel, false);   // visible to scripts again
+```
+
+A widget that scripts cannot see is in no result, and a call that names it fails as if it did not exist. In `layout.items` (see `ui.info()` below) it is left out, and the other items keep their index. `hideWidget()` applies to every `ScriptUi`.
+
+### Widgets and their ids
+
+Every tool that takes a `widget` accepts an id (a number) or an objectName. A name means the first visible widget with that name, in tree order. A widget gets an id the first time a script sees it, and keeps it for as long as the widget lives, in every run and every `ScriptUi`. Ids are not reused.
+
+Most tools return a node:
+
+| Field | |
+|---|---|
+| `id` | The widget's id |
+| `name` | Its objectName; may be empty |
+| `class` | Its class, as its meta-object names it (`QPushButton`). A subclass without `Q_OBJECT` reports its base class |
+| `rect` | `{x, y, width, height}`, in the root's coordinates |
+| `visible`, `enabled` | |
+| `focus` | It is the focus widget of its window |
+| `text` | Only when the widget has one and scripts may read it (see [Privacy](#privacy-passwords-and-text)): its `text`, `title`, `plainText` or `currentText` property, or a window's title |
+
+Children come in the order of `QObject::children()`. That is the stacking order, which is not always the order on screen: a `QSplitter` in particular may list its panes in another order. `ui.info()` gives a layout's items in their order.
+
+### Reading
+
+| Tool | Returns |
+|---|---|
+| `ui.root()` | The root's node |
+| `ui.tree(widget?, depth?)` | The node with its `children`, nested `depth` levels deep (default: all levels). The whole window in one call |
+| `ui.children(widget)` | The child nodes, without their own children |
+| `ui.parent(widget)` | The parent's node; null for the root |
+| `ui.find({name?, class?, text?, exact?})` | The nodes that match every criterion given, in tree order. `name` and `text` match as a substring, ignoring case, or exactly with `exact: true`. `class` matches by inheritance: `"QAbstractButton"` also finds push buttons |
+| `ui.at(x, y)` | The node of the shown widget under the point (root coordinates); null outside the root |
+| `ui.info(widget)` | The node plus `geometry` (in the parent's coordinates), `sizeHint`, `minimumSizeHint`, `minimumSize`, `maximumSize`, `sizePolicy` and `toolTip`. Also the layout the widget sits in (`parentLayout`) and its own layout (`layout`): type, spacing, margins and items, each with its index and stretch, its row, column and spans, or its form row and role |
+| `ui.property(widget, name)` | A readable `Q_PROPERTY`, as JSON |
+| `ui.focused()` | The node of the focus widget, or null |
+| `ui.tabOrder(widget?)` | The nodes of the widget's window (default: the root's window) that take the focus by Tab, in tab order |
+
+Property values as JSON:
+
+| Type | JSON |
+|---|---|
+| Numbers, strings, booleans | As they are |
+| Enums | The key name: `"Horizontal"` |
+| Flags | Joined by `\|`: `"AlignLeft\|AlignTop"` |
+| Size, point, rect | `{width, height}`, `{x, y}`, `{x, y, width, height}` |
+| Colour | `"#rrggbb"`, or `"#aarrggbb"` when it is not opaque |
+| Font | `{family, pointSize, pixelSize, bold, italic}` |
+| Size policy | `{horizontal, vertical, horizontalStretch, verticalStretch}` |
+| Other types | null |
+
+### Changing
+
+Each tool returns the widget's node, unless the table says otherwise. The node also has `managedByLayout: true` when a layout places the widget: the layout may move or resize the widget again at its next pass.
+
+| Tool | |
+|---|---|
+| `ui.move(widget, x, y)`, `ui.resize(widget, width, height)`, `ui.setGeometry(widget, x, y, width, height)` | In the parent's coordinates |
+| `ui.show(widget)`, `ui.hide(widget)` | A window opens or closes |
+| `ui.setEnabled(widget, enabled)` | |
+| `ui.raise(widget)`, `ui.lower(widget)` | Among its siblings |
+| `ui.setFocus(widget)` | |
+| `ui.setTabOrder([widget, ...])` | Tab goes from each widget to the next; all must be in one window. Returns the new tab order |
+| `ui.setCurrentIndex(widget, index)` | Of a `QTabWidget`, `QStackedWidget`, `QComboBox`, `QTabBar` or `QToolBox` |
+| `ui.setLayout(widget, {spacing?, margins?, alignment?, direction?})` | The widget's own layout. `margins` is a number or `{left?, top?, right?, bottom?}`, `alignment` is like `"AlignLeft\|AlignTop"`, and `direction` (box layouts only) is `"LeftToRight"` ... `"BottomToTop"`. Returns the layout as `ui.info()` describes it |
+| `ui.setStretch(widget, stretch, at?)` | The widget's stretch in its box layout. With `at` as `{row}` or `{column}`, the stretch of that row or column in the widget's own grid layout instead; then it returns the layout |
+| `ui.setSplitterSizes(widget, [sizes])` | One size per pane of a `QSplitter`. Returns the sizes the splitter took |
+| `ui.moveToLayout(widget, target, at?)` | Into the layout of `target`, reparented: at `{index}` in a box layout (default: the end), at `{row, column, rowSpan?, columnSpan?}` in a grid, or at `{index}` as a new row of a form |
+| `ui.reorder(widget, index)` | To another place in its box layout, with its stretch |
+| `ui.setProperty(widget, name, value)` | A writable `Q_PROPERTY`, from JSON as in the table above. It also takes sizes as `"100x20"`, points as `"10, 20"`, rects as `"10, 20, 100, 30"`, colours as a name or `{r, g, b, a?}`, and a font as only the parts that change |
+| `ui.restore()` | Undoes what this run changed with these tools, the latest change first, and skips widgets that are gone. Returns `{restored, skipped}` |
+
+### Undo
+
+Every changing tool, `ui.create()` and `ui.close()` included, records how to undo itself in the journal of the calling run. `ui.restore()` works through that journal: the latest change first, then the one before it. So the order of the script's changes matters: restoring the sizes of a splitter that has since been turned on its side would not fit, which is why the [rearranging example](#examples) sets the sizes before it turns the splitter.
+
+Changes stay after the run ends unless the run calls `ui.restore()`. The journal lives only as long as the run: a script that wants its changes undone later keeps itself alive, with a timer or an event handler, and calls `ui.restore()` then:
+
+```js
+ui.hide('statusBar');
+setTimeout(() => ui.restore(), 5000);       // the timer keeps the run alive until then
+```
+
+### Dry runs
+
+In a [dry run](#dry-run) the reading tools run; the changing tools change nothing and answer with their example (a sample node, for most of them). A script that goes on to use what such a tool returned works with that example, not with a real widget.
+
+### Requested runs and the UI
+
+Requested runs may call the `ui` methods like any other methods, under the [approval](#approval) rules set. A script that calls a changing tool is a changing script, so `Approval::ChangingScripts` asks the user before it runs. Reading the UI also tells a lot: how the application is built, and what its widgets show. If that matters, switch the group `UI` or single tools off for everyone, or hide widgets. Widget signals reach a requested run only with `allowEventForRequestedRuns("ui")` (see [Signals as events](#signals-as-events)).
+
+### Privacy: passwords and text
+
+The text of a `QLineEdit` whose echo mode is not `Normal` (a password field) is never returned. Its node has no `text`, `ui.find()` does not match it by text, and `ui.property()` refuses its `text`, `displayText` and `selectedText`. String arguments of its signals arrive as null.
+
+An application whose widgets show data that scripts must not read switches all text off:
+
+```cpp
+ScriptHost::exposeWidgets(engine, mainWindow)->setTextReadable(false);
+```
+
+Then no node has a `text` or a tool tip, `ui.find()` refuses `text`, `ui.property()` refuses every string property except `objectName`, and string arguments of signals arrive as null.
+
+## Building dialogs from scripts
+
+`ui.create()` builds a widget, or a whole dialog, in one call. `ui.exec()` opens a dialog and waits for the answer:
+
+```js
+const d = ui.create({class: 'QDialog', title: 'Look up an item', layout: {type: 'vbox', items: [
+    {class: 'QLabel', text: 'Which item?'},
+    {class: 'QLineEdit', name: 'name', placeholderText: 'Screws'},
+    {class: 'QDialogButtonBox', standardButtons: 'Ok|Cancel'}]}});
+const answer = ui.exec(d.id);               // {accepted: true, button: "OK"}
+if (answer.accepted)
+    log(ui.property(d.ids.name, 'text'));
+```
+
+`ui.create(spec, {parent?, at?}?)` returns `{id, ids}`: the id of the top widget, and the ids of all named widgets by name. Use `d.ids.name` rather than the plain name `'name'`, because a widget of the application with the same objectName could come first in tree order.
+
+### The spec
+
+| Key | |
+|---|---|
+| `class` | Required. One of the [allowed classes](#allowed-classes) |
+| `name` | The objectName. The widget's id goes into `ids` under this name |
+| `title` | The `title` property where the class has one (`QGroupBox`), otherwise the window title (a dialog, a tab page) |
+| any property | A writable `Q_PROPERTY`, converted as `ui.setProperty()` converts it: `text`, `checked`, `placeholderText`, `standardButtons: "Ok\|Cancel"`, `orientation: "Horizontal"`, and so on. `minimum` and `maximum` are set before the other properties, so `value` is not clamped by the default range |
+| `layout` | `{type, spacing?, margins?, items}`. `type` is `"vbox"`, `"hbox"`, `"grid"` or `"form"`. `items` are specs, each with its place in the layout (below) |
+| `children` | Specs for the pages of a `QTabWidget` (each tab is named by its page's `title`), the panes of a `QSplitter`, or the one widget of a `QScrollArea` |
+| `items` | Strings: the entries of a `QComboBox` or `QListWidget` |
+| `role` | `"accept"` or `"reject"`: a button that closes its dialog that way. Only inside a dialog |
+
+The place of a layout item:
+
+| Layout | Keys on the item |
+|---|---|
+| `vbox`, `hbox` | `stretch`. An item with only `{stretch: n}` is an empty stretch |
+| `grid` | `row` (default: the item's index), `column` (default 0), `rowSpan`, `columnSpan` |
+| `form` | `label`: the text of the row's label. Without it, the widget takes the whole row |
+
+A layout cannot contain another layout directly. Wrap the inner one in a widget: `{class: 'QWidget', layout: {...}}`.
+
+Everything is checked before anything is attached. A class that is not allowed, a property that does not exist, a value that does not fit, `items` on a class that takes none: the call fails with the reason, and nothing of the spec is left behind.
+
+Where the result goes:
+
+| Options | |
+|---|---|
+| none | A window of its own, over the root and closed until `ui.show()` or `ui.exec()` opens it |
+| `{parent}` | Into the parent's layout, at the end; a grid needs `at`. When the parent has no layout, onto the parent, shown |
+| `{parent, at}` | Into the parent's layout at `at`, as in `ui.moveToLayout()`: `{index}` in a box layout or a form, `{row, column, rowSpan?, columnSpan?}` in a grid |
+
+`parent` can be any widget scripts can see, including the application's own, so a script can add a button to an existing toolbar or form.
+
+### Buttons that close the dialog
+
+A `QDialogButtonBox` inside a dialog closes it by itself: its accepting buttons (OK, Yes, Save) accept the dialog, and its rejecting buttons (Cancel, No, Close) reject it. A single button does the same with `role`:
+
+```js
+{class: 'QPushButton', text: 'Delete', role: 'accept'}
+```
+
+### Allowed classes
+
+`ui.create()` makes only the classes on the allowed list. The list starts with:
+
+| Kind | Classes |
+|---|---|
+| Containers | `QWidget`, `QDialog`, `QFrame`, `QGroupBox`, `QTabWidget`, `QScrollArea`, `QSplitter` |
+| Controls | `QLabel`, `QPushButton`, `QToolButton`, `QCheckBox`, `QRadioButton`, `QLineEdit`, `QTextEdit`, `QPlainTextEdit`, `QSpinBox`, `QDoubleSpinBox`, `QSlider`, `QComboBox`, `QListWidget`, `QProgressBar`, `QDialogButtonBox` |
+
+The application changes the list on the `ScriptUi`:
+
+```cpp
+ScriptHost::ScriptUi* ui = ScriptHost::exposeWidgets(engine, mainWindow);
+ui->addWidgetFactory("ColorPicker", [] { return new ColorPicker; });   // a class of its own
+ui->removeWidgetClass("QTextEdit");                                      // no rich text from scripts
+QStringList allowed = ui->widgetClasses();                               // the list as it is now
+```
+
+A factory returns a new widget without a parent. Adding a name again replaces its factory. Any other class fails: `the class 'QWebEngineView' is not allowed`.
+
+### Modal and non-modal
+
+`ui.exec(dialog)` opens a `QDialog`, modal for its window, and waits until it closes. The script waits; the application does not. It returns `{accepted, button?}`, where `button` is the button clicked last: its objectName, or its text without `&` when it has no objectName. It opens any dialog that scripts can see, not only one the script created.
+
+**The time limit still applies.** While `ui.exec()` waits for the user, the run's time goes on: with the engine's `Limits` that is 5 minutes, and then the run ends and its dialog goes with it. An application that runs such scripts itself lifts the limit (`RunOptions::timeoutMs = 0`, see [Running until stopped](#running-until-stopped)); a requested run always has the engine's limits.
+
+`ui.show(dialog)` opens it without waiting: the script goes on, and so does the user. The dialog stays open only while the run lives, so the script keeps the run alive with `on()` handlers, and ends it by removing them:
+
+```js
+const d = ui.create({class: 'QDialog', title: 'Counter', layout: {type: 'hbox', items: [
+    {class: 'QPushButton', name: 'add', text: 'Add one'},
+    {class: 'QLabel', name: 'count', text: '0'}]}});
+let n = 0;
+const clicked = ui.connect(d.ids.add, 'clicked');
+const closed = ui.connect(d.id, 'finished');
+on(clicked, () => ui.setProperty(d.ids.count, 'text', String(++n)));
+on(closed, () => { off(clicked); off(closed); });    // no handler left: the run ends
+ui.show(d.id);
+return 'counting';
+```
+
+### Signals as events
+
+`ui.connect(widget, signal)` forwards a widget's signal to the calling run as an [event](#events-keys-mouse-and-your-own), and returns the event's name, `"ui:<id>:<signal>"`. So connecting and handling fit on one line:
+
+```js
+on(ui.connect(okButton, 'clicked'), event => log('clicked, checked:', event.checked));
+```
+
+The widget can be one the script created or one of the application's. `signal` is a name, which picks the overload with the most arguments (`"clicked"` is `clicked(bool)`), or a signature: `"currentIndexChanged(int)"`. Connecting the same signal twice reuses the first connection. `ui.disconnect(widget, signal)` stops it and returns whether it was connected. Both are read-only: they change nothing in the application.
+
+The event's data:
+
+| Field | |
+|---|---|
+| `widget` | The id of the widget that sent the signal |
+| `signal` | The signal's name |
+| `args` | The signal's arguments, in order, as JSON |
+| one field per argument | Named as in Qt's declaration (`checked`, `index`). Where Qt has no name, the field is named by type: `checked` (bool), `text` (string), `value` (int or double), otherwise `arg<n>` |
+
+A widget argument arrives as its id. A string argument of a password field, or of any widget while `setTextReadable(false)` is set, arrives as null. Any signal whose arguments Qt can convert works, not only the common ones.
+
+Like every event, a signal reaches the script only after its body has returned (see [When events arrive](#when-events-arrive)), and its handler keeps the run alive.
+
+**Requested runs** get no widget signals unless the application allows the event family `"ui"`: without it, `ui.connect()` throws `the application does not let requested scripts receive widget signals`.
+
+```cpp
+engine->allowEventForRequestedRuns("ui");    // covers every "ui:..." event
+```
+
+### Lifetime
+
+- Everything a run created goes when the run ends: when it finishes, fails, reaches a limit or is stopped. The widgets are hidden at once and deleted. A script keeps its dialog by staying alive.
+- A run's signal connections end with it.
+- `ui.restore()` also removes what the run created, since `ui.create()` is in the journal (see [Undo](#undo)).
+- `ui.close(widget)` closes a widget; a dialog is rejected. It refuses the root (`the root cannot be closed`), so that a script cannot close the application's main window. It is recorded for `ui.restore()`. It returns the node, or null when closing deleted the widget (`Qt::WA_DeleteOnClose`).
+- `ui.destroy(widget)` deletes a widget at once, but only one this run created, or one below it: `only a widget this run created can be destroyed`. The application's own widgets can be hidden or closed, never deleted, so that it is not left with dangling pointers.
+- Deleting the `ScriptUi` deletes everything scripts created.
+
+In a dry run `ui.create()` makes nothing and answers with its example, `{id: 12, ids: {ok: 14}}`, and `ui.exec()` answers `{accepted: true, button: "OK"}`. A script that goes on to use the ids of its own widgets cannot be dry-run usefully.
+
+### Examples
+
+`examples/LibraryExample` calls `exposeWidgets()` on its main window and ships three scripts for it:
+
+| Script | Shows |
+|---|---|
+| `print-widget-tree.js` | `ui.tree()`, walked in the script: one line per widget, indented by depth |
+| `rearrange-window.js` | `ui.setSplitterSizes()` and `ui.setProperty()` turn the panes side by side, and `ui.restore()` from a timer puts them back after three seconds |
+| `look-up-item.js` | A dialog with a line edit and OK/Cancel from one `ui.create()`, `ui.exec()`, and the answer used for `inventory.get()` |
+
+The example hides its Scripts window frame with `hideWidget()`; the panel inside it is hidden anyway as ScriptHost's own.
+
 ## Requested runs
 
 `requestRun()` is for runs that somebody other than the user asks for: a plugin, a remote connection, an assistant.
@@ -964,6 +1253,36 @@ for (const id of db.listObjects()) { ... }
 
 `script(name)` finds a script by name, ignoring case. Scripts in a read-only directory cannot be changed or deleted; the Scripts window offers Duplicate for them. With a library, `requestRun()` accepts a name instead of code.
 
+## Switching functions off
+
+Every function a script can reach can be switched off by the application, one by one:
+
+| What | Call | Example |
+|---|---|---|
+| A method, built-ins included | `setMethodEnabled(name, bool)` | `engine->setMethodEnabled("ui.destroy", false);` |
+| Every method of a group | `setMethodGroupEnabled(group, bool)` | `engine->setMethodGroupEnabled("UI", false);` |
+| An extension, the whole object | `setExtensionEnabled(name, bool)` | `engine->setExtensionEnabled("gfx", false);` |
+| One member of an extension | `setExtensionMemberEnabled(extension, member, bool)` | `engine->setExtensionMemberEnabled("gfx", "text", false);` |
+| A namespace of an extension, with everything under it | `setExtensionMemberEnabled(extension, namespace, bool)` | `engine->setExtensionMemberEnabled("gfx", "draw", false);` |
+
+A member is named by its path, as in `ScriptExtension::members()`: `"text"`, `"draw.star"`, or a namespace such as `"draw"` or `"ease"`. Switching a namespace off also covers members that are added to it later.
+
+What is switched off:
+
+- is left out of `apiDefinition()`;
+- makes `check()` reject a script that uses it: `the method 'ui.destroy' is disabled`, `'gfx.text' is disabled`;
+- is missing from runs that start later. A disabled member is `undefined` there (`typeof gfx.text`), so calling it fails the way calling `undefined` fails.
+
+Runs that are already going keep what they started with.
+
+Every switch is durable and by name: it may be set before the method or extension exists, and it survives the method being registered again or the extension being added again. Each is on by default.
+
+**Precedence.** A method's own setting wins over its group's. For extensions, a member is there only when the extension, the member itself and every namespace above it are all enabled. Enabling a member never brings it back under a disabled extension or namespace. Each switch keeps its own setting for when the one above it comes back.
+
+**Who decides.** The user can switch methods in the Scripts window, unless the application locks them with `setMethodUserConfigurable(name, false)` or `setMethodGroupUserConfigurable(group, false)` (see [Switches](#switches)). Extensions and their members are for the application alone. Requested runs have a further gate of their own: an extension reaches them only with `allowExtensionForRequestedRuns(name)`.
+
+**Storing the choices.** `userSettings()` holds the user's method switches, for the application to store (see [Switches](#switches)). It does not hold the switches for extensions or extension members. An application that lets its user switch `gfx.text` stores that choice itself and sets it again at start.
+
 ## Switches
 
 | What | By code | Locked against the user |
@@ -971,6 +1290,7 @@ for (const id of db.listObjects()) { ... }
 | Requested runs | `setEnabled(bool)` | `setEnabledUserConfigurable(false)` |
 | What needs approval | `setApprovalRequired(kind, bool)`, `setApproval(preset)` | `setApprovalUserConfigurable(kind, false)`, or `(false)` for every kind |
 | Each method | `setMethodEnabled`, `setMethodGroupEnabled` | `setMethodUserConfigurable`, `setMethodGroupUserConfigurable` |
+| Extensions and their members | `setExtensionEnabled`, `setExtensionMemberEnabled` (see [Switching functions off](#switching-functions-off)) | Always locked: the application decides |
 | Editing saved scripts in the Scripts window | `setUserMayEditScripts(bool)` | |
 | Runner and debugger in the editor | `setDebuggerEnabled(bool)` | |
 
@@ -1086,6 +1406,14 @@ What the sections above did not need.
 | `useApprovalDialog(engine, parent)` | Installs the approval dialog as the engine's approval handler. See [Approval](#approval) |
 | `forwardInput(engine, widget)` | Posts the widget's keys and clicks as events, registers `input.mouse()`; returns the forwarder, delete it to stop. See [Keys and the mouse](#keys-and-the-mouse-forwardinput) |
 | `attachCanvas(engine, target)` | A canvas over `target`: `gfx` for new runs; returns the `ScriptCanvas`, delete it to detach. See [the canvas](#drawing-over-the-window-the-canvas) |
+| `exposeWidgets(engine, root)` | The `ui` methods for `root`'s widget tree; returns the `ScriptUi`, delete it to stop. See [Reading and changing the UI](#reading-and-changing-the-ui) |
+
+| `ScriptUi` | |
+|---|---|
+| `static hideWidget(widget, hidden)` | Hides a widget and everything below it from scripts. See [What scripts see](#what-scripts-see) |
+| `setTextReadable(bool)`, `isTextReadable()` | Off: scripts read no text. See [Privacy](#privacy-passwords-and-text) |
+| `addWidgetFactory(className, factory)`, `removeWidgetClass(className)`, `widgetClasses()` | The classes `ui.create()` makes. See [Allowed classes](#allowed-classes) |
+| `root()` | |
 
 | `ScriptCanvas` | |
 |---|---|
@@ -1111,6 +1439,19 @@ Every `run*` signal names its run first.
 | `runPaused(id, line, method, arguments, variables)`, `runCallFinished(id, line, method, arguments, value, error)` | Debugger |
 | `runsChanged()` | `runs()` changed |
 | `enabledChanged(bool)`, `methodsChanged()`, `settingsChanged()` | Switches and locks |
+
+## New in 2.3
+
+2.3 lets scripts work with the application's widgets, and lets the application switch every function off on its own:
+
+- [Reading and changing the UI](#reading-and-changing-the-ui) (ScriptHostWidgets): `exposeWidgets(engine, root)` gives scripts the `ui` methods. They read the widget tree, change widgets and layouts, and undo their changes with `ui.restore()`.
+- [Building dialogs from scripts](#building-dialogs-from-scripts): `ui.create()` and `ui.exec()`, and widget signals as events with `ui.connect()`.
+- [Switching functions off](#switching-functions-off): the members of an extension can be switched one by one (`setExtensionMemberEnabled`).
+
+Two behaviours changed:
+
+- **Arguments.** A single object passed to a method whose first parameter has the type `object` is now that first argument, also when the method has more parameters. Before, it was taken as named arguments. See [Defining a method](#defining-a-method).
+- **Events for requested runs.** An allowed event name now also covers the names that start with it and a colon: allowing `"sensor"` also allows `"sensor:temperature"`. See [Requested runs get no events](#requested-runs-get-no-events).
 
 ## New in 2.2
 
