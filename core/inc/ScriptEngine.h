@@ -71,8 +71,32 @@ public:
     void setRequesterName(const QString& name);
     QString requesterName() const { return m_requesterName; }
 
+    // ---- Switching off what scripts can use ------------------------------
+    // Every function a script can reach can be switched off by the
+    // application, one by one:
+    //   a method              setMethodEnabled(), or its group with
+    //                         setMethodGroupEnabled(); the user may switch it
+    //                         too, unless locked (setMethodUserConfigurable).
+    //   an extension          setExtensionEnabled(): the whole object.
+    //   an extension's member setExtensionMemberEnabled(): "text" of gfx, or a
+    //                         namespace of it ("draw", "ease") with everything
+    //                         under it, members added later included.
+    // All of them are durable by name: they may be set before the method or
+    // extension exists and survive it being registered again. What is
+    // switched off is left out of apiDefinition(), check() rejects a script
+    // that uses it ("the method 'db.write' is disabled", "'gfx.text' is
+    // disabled"), and a run started later does not have it. Runs already
+    // active keep what they started with.
+    // Precedence, for extensions: a member is there only when its extension,
+    // the member itself and every namespace above it are enabled. Enabling a
+    // member never brings it back under a disabled extension or namespace;
+    // each switch keeps its own setting for when the one above comes back.
+
     // ---- The methods a script can call ------------------------------------
-    // Registering a name again replaces the method.
+    // Registering a name again replaces the method. A name that is not valid,
+    // or that is an extension's or lies in its name space ("gfx" or
+    // "gfx.line" while the extension gfx is added), is refused with a
+    // warning; a name space no extension uses ("ui.tree") is fine.
     void registerMethod(const ScriptMethod& method, ScriptMethodHandler handler);
     void registerAsyncMethod(const ScriptMethod& method, AsyncScriptMethodHandler handler);
     void unregisterMethod(const QString& name);
@@ -111,6 +135,19 @@ public:
     // Default enabled.
     void setExtensionEnabled(const QString& name, bool enabled);
     bool isExtensionEnabled(const QString& name) const;
+    // One member of an extension, by its path as in ScriptExtension::members()
+    // ("text", "draw.star", or a namespace: "draw", "ease"). Durable, by
+    // name, may be set before the extension is added or the member exists.
+    // Disabled: check() rejects a use of it ("'gfx.text' is disabled"),
+    // apiDefinition() leaves its declaration out, and in new runs it is
+    // absent - `typeof gfx.text` is "undefined", so a call fails as a call of
+    // undefined does. See the precedence above. Default enabled.
+    void setExtensionMemberEnabled(const QString& extension, const QString& member, bool enabled);
+    // False also when the extension, or a namespace above the member, is
+    // disabled.
+    bool isExtensionMemberEnabled(const QString& extension, const QString& member) const;
+    // The members switched off with setExtensionMemberEnabled(), sorted.
+    QStringList disabledExtensionMembers(const QString& extension) const;
     // A requested run (requestRun(), or RunOptions::external) gets no
     // extension that is not allowed here, and check(code, true) rejects a use
     // of it. Nothing is allowed by default.
@@ -188,6 +225,7 @@ public:
         bool        dryRun = false;
         QStringList methods;            // the methods the script uses
         QStringList changingMethods;    // those of them that are not read-only
+        QStringList extensions;         // the extensions it uses, as in Check
         bool        dynamic = false;    // may call more than the source shows
     };
     struct ApprovalDecision
@@ -221,6 +259,11 @@ public:
         QString     didYouMean;
         QStringList methods;            // the methods the script uses
         QStringList changingMethods;
+        // The extensions it uses, each followed by the members it uses:
+        // "gfx", "gfx.rect", "gfx.draw.star", "ext", ... - a member as
+        // ScriptExtension::members() names it, or the way to one ("gfx.draw").
+        // An extension used as a whole (`const g = gfx;`) has its name only.
+        QStringList extensions;
         bool        dynamic = false;
         // The error as a result object; {"status":"ok"} when ok.
         QJsonObject toJson() const;
@@ -418,6 +461,10 @@ private:
     struct Run;     // one run in progress
 
     void registerBuiltins();
+    // A valid method name outside the extensions' name spaces; warns if not.
+    bool acceptsMethodName(const QString& name) const;
+    // Is `path` of the extension switched off itself, or by a namespace above it?
+    bool isMemberDisabled(const QString& extension, const QString& path) const;
     bool policy(const QHash<QString, bool>& byName, const QHash<QString, bool>& byGroup,
                 const ScriptMethod& method, bool fallback) const;
     const Entry* findEntry(const QString& name) const;
@@ -447,6 +494,7 @@ private:
     QSet<QString>       m_requestedEvents;  // allowEventForRequestedRuns()
     QList<QSharedPointer<ScriptExtension>> m_extensions;
     QSet<QString>       m_disabledExtensions;   // setExtensionEnabled()
+    QHash<QString, QSet<QString>> m_disabledMembers;    // setExtensionMemberEnabled(), by extension
     QSet<QString>       m_requestedExtensions;  // allowExtensionForRequestedRuns()
 
     QMap<RunId, Run*>   m_active;           // the runs in progress, owned

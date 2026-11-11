@@ -150,6 +150,74 @@ QString logText(const QString& argsJson)
     return parts.join(QLatin1Char(' '));
 }
 
+// Qt 5's cache of what a class offers to JavaScript is shared by all engines
+// of the process, and looks up a member's type on its first use without a
+// lock; it is dropped when no engine uses the class any more, and made anew.
+// So two runs that start side by side race on the first use of a member (a
+// debug Qt asserts in qqmlpropertycache.cpp). Each run therefore looks up all
+// members of what it wraps, under a lock, before its script runs: a run that
+// runs script finds them resolved. Reads each property once.
+void resolveMembers(const QJSValue& wrapped, const QMetaObject* metaObject)
+{
+    static QMutex mutex;
+    QMutexLocker lock(&mutex);
+    for (int i = 0; i < metaObject->methodCount(); ++i)
+        wrapped.property(QString::fromLatin1(metaObject->method(i).name()));
+    for (int i = 0; i < metaObject->propertyCount(); ++i)
+        wrapped.property(QString::fromLatin1(metaObject->property(i).name()));
+}
+
+// What a script sees of an extension with members switched off
+// (ScriptEngine::setExtensionMemberEnabled): a copy without them. `hidden`
+// are paths ("text", "draw.star", "ease"); what lies under a hidden one is
+// hidden too. A plain object (the glue's) is copied property by property,
+// getters included, and frozen when it was. A QObject (`live`) is not
+// copied: its properties are read and written through, as they change.
+const char* const kWithoutMembers = R"JS((function (root, hidden, live) {
+    function isHidden(p) {
+        for (var i = 0; i < hidden.length; ++i)
+            if (p === hidden[i] || p.indexOf(hidden[i] + '.') === 0) return true;
+        return false;
+    }
+    function hasBelow(p) {
+        for (var i = 0; i < hidden.length; ++i)
+            if (hidden[i].indexOf(p + '.') === 0) return true;
+        return false;
+    }
+    function view(src, prefix, live) {
+        if (src === null || (typeof src !== 'object' && typeof src !== 'function')) return src;
+        var out = typeof src === 'function'
+            ? function () { return src.apply(this, arguments); }
+            : Object.create(Object.getPrototypeOf(src));
+        Object.getOwnPropertyNames(src).forEach(function (k) {
+            var p = prefix + k;
+            if (isHidden(p) || (typeof src === 'function' && (k === 'length' || k === 'name' || k === 'prototype')))
+                return;
+            var below = hasBelow(p);
+            if (live) {
+                Object.defineProperty(out, k, {
+                    enumerable: true,
+                    get: function () { var v = src[k]; return below ? view(v, p + '.', true) : v; },
+                    set: function (v) { src[k] = v; }
+                });
+                return;
+            }
+            var d = Object.getOwnPropertyDescriptor(src, k);
+            if (below && 'value' in d) {
+                d.value = view(d.value, p + '.', false);
+            } else if (below && d.get) {
+                var get = d.get;
+                d.get = function () { return view(get.call(src), p + '.', false); };
+            }
+            Object.defineProperty(out, k, d);
+        });
+        if (Object.isFrozen(src)) Object.freeze(out);
+        else if (!Object.isExtensible(src)) Object.preventExtensions(out);
+        return out;
+    }
+    return view(root, '', live);
+}))JS";
+
 } // namespace
 
 ScriptRunner::ScriptRunner(const ScriptRunConfig& config, const QSharedPointer<ScriptRunShared>& shared,
@@ -315,7 +383,9 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
 
     // The engine owns the bridge (an object without a parent handed to
     // newQObject) and deletes it with itself.
-    const QJSValue native = engine.newQObject(new ScriptBridge(this));
+    auto* bridge = new ScriptBridge(this);
+    const QJSValue native = engine.newQObject(bridge);
+    resolveMembers(native, bridge->metaObject());
     const QJSValue prelude = engine.evaluate(QLatin1String(kPrelude), QStringLiteral("prelude"))
                                  .call({native});
     QJSValue make = prelude.property(QStringLiteral("make"));
@@ -477,6 +547,7 @@ QJsonObject ScriptRunner::installExtensions(QJSEngine& engine)
             m_extensionObjects.append(object);
         }
         QJSValue value = engine.newQObject(object);
+        resolveMembers(value, object->metaObject());
         const QString glue = extension->glue();
         if (!glue.isEmpty()) {
             QJSValue make = engine.evaluate(glue, QStringLiteral("extension:") + name);
@@ -486,6 +557,18 @@ QJsonObject ScriptRunner::installExtensions(QJSEngine& engine)
                         {"message", QStringLiteral("the extension '%1' could not start: %2")
                                         .arg(name, make.isCallable() ? value.toString()
                                                                       : QStringLiteral("its glue is not a function"))}};
+            }
+        }
+        const QStringList hidden = m_config.hiddenMembers.value(name);
+        if (!hidden.isEmpty()) {
+            QJSValue paths = engine.newArray(uint(hidden.size()));
+            for (int i = 0; i < hidden.size(); ++i)
+                paths.setProperty(quint32(i), hidden[i]);
+            value = engine.evaluate(QString::fromLatin1(kWithoutMembers), QStringLiteral("extension:") + name)
+                        .call({value, paths, QJSValue(value.isQObject())});
+            if (value.isError()) {
+                return {{"status", "error"}, {"phase", "runtime"},
+                        {"message", QStringLiteral("the extension '%1' could not start: %2").arg(name, value.toString())}};
             }
         }
         global.setProperty(name, value);

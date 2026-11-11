@@ -6,6 +6,7 @@
 
 #include "UnitTest.h"
 #include "TestSupport.h"
+#include "TestExtension.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QDialog>
@@ -34,6 +35,7 @@ public:
         ADD_TEST(TST_ScriptRequests::testAbandonedRequest);
         ADD_TEST(TST_ScriptRequests::testApprovalWithoutHandler);
         ADD_TEST(TST_ScriptRequests::testApprovalDialog);
+        ADD_TEST(TST_ScriptRequests::testApprovalDialogListsExtensions);
     }
 
 private:
@@ -518,6 +520,41 @@ private:
         result = TestSupport::request(engine, TestSupport::codeRequest("return db.list().length;"));
         TEST_COMPARE(result["status"].toString(), QString("ok"));
         TEST_COMPARE(result["result"].toInt(), 6);
+    }
+
+    // I-008: the dialog names the extensions a requested script uses, with
+    // their members, and the request carries them.
+    TEST_FUNCTION(testApprovalDialogListsExtensions)
+    {
+        TEST_START;
+
+        Engine engine;
+        Db db;
+        TestSupport::registerDb(engine, db);
+        engine.addExtension(QSharedPointer<TestExtension>::create("ext"));
+        engine.allowExtensionForRequestedRuns("ext");
+        engine.setApproval(Engine::Approval::Always);
+
+        QStringList requested;
+        engine.setApprovalHandler([&requested](const Engine::ApprovalRequest& request,
+                                               std::function<void(const Engine::ApprovalDecision&)> decide) {
+            requested = request.extensions;
+            decide(Engine::ApprovalDecision());
+        });
+        const QString code = "ext.note('x');\nreturn ext.add(1, 2) + db.list().length;";
+        TestSupport::request(engine, TestSupport::codeRequest(code));
+        TEST_COMPARE(requested, (QStringList{"ext", "ext.note", "ext.add"}));
+
+        ScriptHost::useApprovalDialog(&engine);
+        QString shownUses;
+        onApprovalDialog([&shownUses](QDialog* dialog) {
+            shownUses = dialog->findChild<QLabel*>("scripthost_scriptApprovalUses")->text();
+            dialog->findChild<QPushButton*>("scripthost_scriptApprovalDecline")->click();
+        });
+        const QJsonObject result = TestSupport::request(engine, TestSupport::codeRequest(code));
+        TEST_COMPARE(result["phase"].toString(), QString("declined"));
+        TEST_ASSERT(shownUses.contains("db.list (reads)"));
+        TEST_ASSERT(shownUses.contains("It uses objects of the application: ext (note, add)"));
     }
 
     // The built-in dialog: shows the script and who asks, and Decline carries the reason.

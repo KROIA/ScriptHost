@@ -51,6 +51,7 @@ struct ScriptRunConfig
     QSet<QString> requestedEvents;
     quint64 runId = 0;          // the engine's RunId, for the extensions
     QList<QSharedPointer<ScriptExtension>> extensions;  // created at the start, in this order
+    QHash<QString, QStringList> hiddenMembers;          // by extension: the members switched off
 };
 
 // State both threads touch, under `mutex`.

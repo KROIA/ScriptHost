@@ -30,6 +30,10 @@ public:
         ADD_TEST(TST_ScriptExtensions::testKeepAliveAndStop);
         ADD_TEST(TST_ScriptExtensions::testRequestedRunsNeedTheOptIn);
         ADD_TEST(TST_ScriptExtensions::testEnableSwitch);
+        ADD_TEST(TST_ScriptExtensions::testMemberSwitch);
+        ADD_TEST(TST_ScriptExtensions::testMemberSwitchInGlue);
+        ADD_TEST(TST_ScriptExtensions::testMethodNameClash);
+        ADD_TEST(TST_ScriptExtensions::testCheckReportsExtensions);
         ADD_TEST(TST_ScriptExtensions::testRemoveWhileRunning);
         ADD_TEST(TST_ScriptExtensions::testDryRunAndCompileOnly);
     }
@@ -512,6 +516,188 @@ private:
         auto late = addExtension(early);
         TEST_COMPARE(TestSupport::runScript(early, "return typeof ext;")["result"].toString(), QString("undefined"));
         TEST_COMPARE(late->created, 0);
+    }
+
+    // One member of a QObject extension (no glue) switched off and on again.
+    TEST_FUNCTION(testMemberSwitch)
+    {
+        TEST_START;
+
+        Engine engine;
+        auto extension = addExtension(engine);
+        engine.setApiBudgetChars(0);
+        int changes = 0;
+        QObject::connect(&engine, &Engine::methodsChanged, [&changes]() { ++changes; });
+
+        engine.setExtensionMemberEnabled("ext", "add", false);
+        TEST_COMPARE(changes, 1);
+        engine.setExtensionMemberEnabled("ext", "add", false);     // no change
+        TEST_COMPARE(changes, 1);
+        TEST_ASSERT(!engine.isExtensionMemberEnabled("ext", "add"));
+        TEST_ASSERT(engine.isExtensionMemberEnabled("ext", "note"));
+        TEST_COMPARE(engine.disabledExtensionMembers("ext"), QStringList{"add"});
+
+        // check() rejects it, and does not suggest it.
+        const Engine::Check check = engine.check("const a = 1;\nreturn ext.add(1, 2);");
+        TEST_ASSERT(!check.ok);
+        TEST_COMPARE(check.phase, QString("check"));
+        TEST_COMPARE(check.line, 2);
+        TEST_COMPARE(check.message, QString("'ext.add' is disabled"));
+        TEST_ASSERT(engine.check("return ext.note('x');").ok);
+        TEST_COMPARE(engine.check("return ext.ad(1, 2);").didYouMean, QString());
+
+        // Not in the definition; the rest of the extension is.
+        TEST_ASSERT(!engine.apiDefinition().contains("function add("));
+        TEST_ASSERT(!engine.apiDefinition().contains("Adds two numbers"));
+        TEST_ASSERT(engine.apiDefinition().contains("declare namespace ext {"));
+
+        // Absent in a run; the other members work, properties too.
+        QJsonObject result = TestSupport::runScript(engine,
+            "ext.note('noted');\n"
+            "let threw = '';\n"
+            "try { ext['add'](1, 2); } catch (e) { threw = e.name; }\n"
+            "return [typeof ext.add, 'add' in ext, typeof ext.note, ext.isDryRun(), threw, ext.objectName];");
+        TEST_COMPARE(result["status"].toString(), QString("ok"));
+        const QJsonArray values = result["result"].toArray();
+        TEST_COMPARE(values.at(0).toString(), QString("undefined"));
+        TEST_ASSERT(!values.at(1).toBool());
+        TEST_COMPARE(values.at(2).toString(), QString("function"));
+        TEST_ASSERT(!values.at(3).toBool());
+        TEST_COMPARE(values.at(4).toString(), QString("TypeError"));
+        TEST_ASSERT(result["log"].toArray().contains(QJsonValue("noted")));
+
+        // On again.
+        engine.setExtensionMemberEnabled("ext", "add", true);
+        TEST_COMPARE(changes, 2);
+        TEST_ASSERT(engine.isExtensionMemberEnabled("ext", "add"));
+        TEST_ASSERT(engine.disabledExtensionMembers("ext").isEmpty());
+        TEST_ASSERT(engine.check("return ext.add(1, 2);").ok);
+        TEST_ASSERT(engine.apiDefinition().contains("function add(a: number, b: number): number;"));
+        TEST_COMPARE(TestSupport::runScript(engine, "return ext.add(1, 2);")["result"].toInt(), 3);
+
+        // Precedence: the extension switched off switches every member off;
+        // the member keeps its own setting for when it comes back.
+        engine.setExtensionMemberEnabled("ext", "note", false);
+        engine.setExtensionEnabled("ext", false);
+        TEST_ASSERT(!engine.isExtensionMemberEnabled("ext", "add"));
+        engine.setExtensionEnabled("ext", true);
+        TEST_ASSERT(engine.isExtensionMemberEnabled("ext", "add"));
+        TEST_ASSERT(!engine.isExtensionMemberEnabled("ext", "note"));
+
+        // Durable by name: set before the extension exists.
+        Engine early;
+        early.setExtensionMemberEnabled("ext", "add", false);
+        addExtension(early);
+        TEST_COMPARE(TestSupport::runScript(early, "return typeof ext.add;")["result"].toString(), QString("undefined"));
+    }
+
+    // Glue: nested members and namespaces, getters, a frozen object.
+    TEST_FUNCTION(testMemberSwitchInGlue)
+    {
+        TEST_START;
+
+        Engine engine;
+        const QString glue =
+            "(function(native){ var n = 0; var g = {"
+            " twice: function(x){ return native.add(x, x); },"
+            " info: Object.freeze({ version: 2, build: Object.freeze({ date: 'today' }) }) };"
+            " Object.defineProperty(g, 'count', { get: function(){ return ++n; } });"
+            " return Object.freeze(g); })";
+        engine.addExtension(QSharedPointer<TestExtension>::create("ext", glue));
+
+        // A namespace: everything under it goes.
+        engine.setExtensionMemberEnabled("ext", "info", false);
+        TEST_ASSERT(!engine.isExtensionMemberEnabled("ext", "info.build.date"));
+        Engine::Check check = engine.check("return ext.info.build.date;");
+        TEST_ASSERT(!check.ok);
+        TEST_COMPARE(check.message, QString("'ext.info' is disabled"));
+        QJsonObject result = TestSupport::runScript(engine,
+            "return [typeof ext.info, ext.twice(3), ext.count, ext.count, Object.isFrozen(ext)];");
+        TEST_COMPARE(result["status"].toString(), QString("ok"));
+        QJsonArray values = result["result"].toArray();
+        TEST_COMPARE(values.at(0).toString(), QString("undefined"));
+        TEST_COMPARE(values.at(1).toInt(), 6);
+        TEST_COMPARE(values.at(2).toInt(), 1);      // the getter, still called each time
+        TEST_COMPARE(values.at(3).toInt(), 2);
+        TEST_ASSERT(values.at(4).toBool());
+
+        // A member below a namespace: its siblings stay. Enabling it does not
+        // bring it back while the namespace is off.
+        engine.setExtensionMemberEnabled("ext", "info", true);
+        engine.setExtensionMemberEnabled("ext", "info.build.date", false);
+        check = engine.check("return ext.info.build.date;");
+        TEST_COMPARE(check.message, QString("'ext.info.build.date' is disabled"));
+        TEST_ASSERT(engine.check("return ext.info.version;").ok);
+        result = TestSupport::runScript(engine,
+            "return [ext.info.version, typeof ext.info.build, typeof ext.info.build.date, Object.isFrozen(ext.info)];");
+        values = result["result"].toArray();
+        TEST_COMPARE(values.at(0).toInt(), 2);
+        TEST_COMPARE(values.at(1).toString(), QString("object"));
+        TEST_COMPARE(values.at(2).toString(), QString("undefined"));
+        TEST_ASSERT(values.at(3).toBool());
+        engine.setExtensionMemberEnabled("ext", "info", false);
+        TEST_ASSERT(!engine.isExtensionMemberEnabled("ext", "info.version"));
+        engine.setExtensionMemberEnabled("ext", "info", true);
+        TEST_ASSERT(engine.isExtensionMemberEnabled("ext", "info.version"));
+        TEST_ASSERT(!engine.isExtensionMemberEnabled("ext", "info.build.date"));
+    }
+
+    // I-007: a method in an extension's name space is refused; other name spaces are fine.
+    TEST_FUNCTION(testMethodNameClash)
+    {
+        TEST_START;
+
+        Engine engine;
+        addExtension(engine);
+        auto handler = [](const QJsonObject&) -> QJsonValue { return 1; };
+        engine.registerMethod(ScriptHost::ScriptMethod("ext"), handler);
+        engine.registerMethod(ScriptHost::ScriptMethod("ext.add"), handler);
+        engine.registerAsyncMethod(ScriptHost::ScriptMethod("ext.later"),
+                                   [](const QJsonObject&, ScriptHost::ScriptCompletion done) { done.finish(1); });
+        TEST_ASSERT(!engine.hasMethod("ext"));
+        TEST_ASSERT(!engine.hasMethod("ext.add"));
+        TEST_ASSERT(!engine.hasMethod("ext.later"));
+
+        // A name space no extension uses, or one that only starts like one.
+        engine.registerMethod(ScriptHost::ScriptMethod("ui.tree"), handler);
+        engine.registerMethod(ScriptHost::ScriptMethod("extra.read"), handler);
+        engine.registerMethod(ScriptHost::ScriptMethod("next"), handler);
+        TEST_ASSERT(engine.hasMethod("ui.tree"));
+        TEST_ASSERT(engine.hasMethod("extra.read"));
+        TEST_ASSERT(engine.hasMethod("next"));
+
+        // Once the extension is gone, the name is free.
+        engine.removeExtension("ext");
+        engine.registerMethod(ScriptHost::ScriptMethod("ext.add"), handler);
+        TEST_ASSERT(engine.hasMethod("ext.add"));
+    }
+
+    // I-008: check() names the extensions and members a script uses.
+    TEST_FUNCTION(testCheckReportsExtensions)
+    {
+        TEST_START;
+
+        Engine engine;
+        addExtension(engine);
+        engine.addExtension(QSharedPointer<TestExtension>::create("other"));
+        TestSupport::Db db;
+        TestSupport::registerDb(engine, db);
+
+        const Engine::Check check = engine.check(
+            "ext.add(1, 2);\n"
+            "const v = ext.info.version.toFixed(1);\n"
+            "other.note('x');\n"
+            "ext.add(2, 3);\n"
+            "const b = ext.info.build;\n"
+            "return db.list();");
+        TEST_ASSERT(check.ok);
+        TEST_COMPARE(check.extensions, (QStringList{"ext", "ext.add", "ext.info.version", "ext.info.build", "other",
+                                                    "other.note"}));
+        TEST_COMPARE(check.methods, QStringList{"db.list"});
+
+        // Used as a whole: the name only.
+        TEST_COMPARE(engine.check("const e = ext;\nreturn e;").extensions, QStringList{"ext"});
+        TEST_ASSERT(engine.check("return 1;").extensions.isEmpty());
     }
 
     TEST_FUNCTION(testRemoveWhileRunning)

@@ -374,12 +374,28 @@ void ScriptEngine::setDebuggerEnabled(bool enabled)
 
 // ------------------------------------------------------------ methods
 
+bool ScriptEngine::acceptsMethodName(const QString& name) const
+{
+    if (!ScriptMethod::isValidName(name)) {
+        qWarning("ScriptHost::ScriptEngine: '%s' is not a valid method name", qPrintable(name));
+        return false;
+    }
+    // The extension's global would hide the method, or the method the extension.
+    const QString first = name.section(QLatin1Char('.'), 0, 0);
+    for (const QSharedPointer<ScriptExtension>& extension : m_extensions) {
+        if (extension->name() == first) {
+            qWarning("ScriptHost::ScriptEngine: the method '%s' is in the name space of the extension '%s'",
+                     qPrintable(name), qPrintable(first));
+            return false;
+        }
+    }
+    return true;
+}
+
 void ScriptEngine::registerMethod(const ScriptMethod& method, ScriptMethodHandler handler)
 {
-    if (!ScriptMethod::isValidName(method.name())) {
-        qWarning("ScriptHost::ScriptEngine: '%s' is not a valid method name", qPrintable(method.name()));
+    if (!acceptsMethodName(method.name()))
         return;
-    }
     Entry entry;
     entry.method = method;
     entry.handler = std::move(handler);
@@ -396,10 +412,8 @@ void ScriptEngine::registerMethod(const ScriptMethod& method, ScriptMethodHandle
 
 void ScriptEngine::registerAsyncMethod(const ScriptMethod& method, AsyncScriptMethodHandler handler)
 {
-    if (!ScriptMethod::isValidName(method.name())) {
-        qWarning("ScriptHost::ScriptEngine: '%s' is not a valid method name", qPrintable(method.name()));
+    if (!acceptsMethodName(method.name()))
         return;
-    }
     Entry entry;
     entry.method = method;
     entry.asyncHandler = std::move(handler);
@@ -573,6 +587,43 @@ bool ScriptEngine::isExtensionEnabled(const QString& name) const
     return !m_disabledExtensions.contains(name);
 }
 
+void ScriptEngine::setExtensionMemberEnabled(const QString& extension, const QString& member, bool enabled)
+{
+    QSet<QString>& disabled = m_disabledMembers[extension];
+    if (enabled == !disabled.contains(member))
+        return;
+    if (enabled)
+        disabled.remove(member);
+    else
+        disabled.insert(member);
+    emit methodsChanged();
+}
+
+bool ScriptEngine::isExtensionMemberEnabled(const QString& extension, const QString& member) const
+{
+    return isExtensionEnabled(extension) && !isMemberDisabled(extension, member);
+}
+
+QStringList ScriptEngine::disabledExtensionMembers(const QString& extension) const
+{
+    QStringList members = m_disabledMembers.value(extension).values();
+    members.sort();
+    return members;
+}
+
+bool ScriptEngine::isMemberDisabled(const QString& extension, const QString& path) const
+{
+    const auto it = m_disabledMembers.constFind(extension);
+    if (it == m_disabledMembers.cend() || it->isEmpty())
+        return false;
+    // "draw.star" is off when "draw.star" or "draw" is.
+    for (int dot = path.indexOf(QLatin1Char('.')); dot >= 0; dot = path.indexOf(QLatin1Char('.'), dot + 1)) {
+        if (it->contains(path.left(dot)))
+            return true;
+    }
+    return it->contains(path);
+}
+
 void ScriptEngine::allowExtensionForRequestedRuns(const QString& name, bool allow)
 {
     if (allow)
@@ -587,6 +638,202 @@ bool ScriptEngine::isExtensionAllowedForRequestedRuns(const QString& name) const
 }
 
 // ------------------------------------------------------------ definition
+
+namespace
+{
+
+// Leaves an extension's switched-off members out of its declaration. Works on
+// the text, as a list of items: the statements of a namespace
+// ("function text(...);", "const ease: {...};", "namespace draw {...}") and
+// the members of an object type ("outQuad(t: number): number;"). A hidden
+// item goes with its doc comment; one with hidden members below it is
+// filtered inside its braces. Types (interface, type) stay: they are no
+// members.
+class MemberFilter
+{
+public:
+    MemberFilter(const QString& text, const QString& extension, const QStringList& hidden)
+        : m_text(text)
+        , m_extension(extension)
+        , m_hidden(hidden)
+    {
+    }
+
+    QString filtered() const { return items(0, m_text.size(), QString(), false, false); }
+
+private:
+    struct Head
+    {
+        QString keyword;    // "function", "const", "namespace", ...; empty for a member of an object type
+        QString name;
+    };
+
+    int skipTrivia(int i, int end) const
+    {
+        while (i < end) {
+            if (m_text[i].isSpace()) {
+                ++i;
+            } else if (m_text[i] == QLatin1Char('/') && i + 1 < end && m_text[i + 1] == QLatin1Char('/')) {
+                const int eol = m_text.indexOf(QLatin1Char('\n'), i);
+                i = eol < 0 || eol >= end ? end : eol + 1;
+            } else if (m_text[i] == QLatin1Char('/') && i + 1 < end && m_text[i + 1] == QLatin1Char('*')) {
+                const int close = m_text.indexOf(QLatin1String("*/"), i + 2);
+                i = close < 0 || close + 2 > end ? end : close + 2;
+            } else {
+                break;
+            }
+        }
+        return i;
+    }
+
+    QString identifier(int* i, int end) const
+    {
+        const int start = *i;
+        while (*i < end && (m_text[*i].isLetterOrNumber() || m_text[*i] == QLatin1Char('_')
+                            || m_text[*i] == QLatin1Char('$')))
+            ++*i;
+        return m_text.mid(start, *i - start);
+    }
+
+    Head head(int begin, int end, bool literal) const
+    {
+        static const QStringList modifiers{"export", "declare", "static", "abstract"};
+        static const QStringList keywords{"function", "const", "let", "var", "namespace", "module",
+                                          "class", "enum", "interface", "type"};
+        Head result;
+        int i = begin;
+        for (;;) {
+            i = skipTrivia(i, end);
+            const QString word = identifier(&i, end);
+            if (literal) {
+                // "readonly x: T" - but a member may be called readonly too.
+                int next = skipTrivia(i, end);
+                const QString name = word == QLatin1String("readonly") ? identifier(&next, end) : QString();
+                result.name = name.isEmpty() ? word : name;
+                return result;
+            }
+            if (word.isEmpty() || !modifiers.contains(word)) {
+                if (keywords.contains(word)) {
+                    result.keyword = word;
+                    i = skipTrivia(i, end);
+                    result.name = identifier(&i, end);
+                }
+                return result;
+            }
+        }
+    }
+
+    bool isHidden(const QString& path) const
+    {
+        return std::any_of(m_hidden.cbegin(), m_hidden.cend(), [&path](const QString& h) {
+            return path == h || path.startsWith(h + QLatin1Char('.'));
+        });
+    }
+
+    bool hasHiddenBelow(const QString& path) const
+    {
+        const QString below = path + QLatin1Char('.');
+        return std::any_of(m_hidden.cbegin(), m_hidden.cend(), [&below](const QString& h) {
+            return h.startsWith(below);
+        });
+    }
+
+    static bool endsWithBlock(const QString& keyword)
+    {
+        return keyword == QLatin1String("namespace") || keyword == QLatin1String("module")
+               || keyword == QLatin1String("class") || keyword == QLatin1String("enum")
+               || keyword == QLatin1String("interface");
+    }
+
+    // The items of [begin, end). `inside`: in the extension's namespace, at
+    // `prefix` ("" or "draw."); `literal`: members of an object type.
+    QString items(int begin, int end, const QString& prefix, bool inside, bool literal) const
+    {
+        QString out;
+        int itemStart = begin;
+        int open = -1, close = -1, depth = 0;
+        auto finish = [&](int itemEnd) {
+            out += item(itemStart, itemEnd, open, close, prefix, inside, literal);
+            itemStart = itemEnd;
+            open = close = -1;
+        };
+        int i = begin;
+        while (i < end) {
+            const QChar c = m_text[i];
+            if (c == QLatin1Char('/') && i + 1 < end
+                && (m_text[i + 1] == QLatin1Char('/') || m_text[i + 1] == QLatin1Char('*'))) {
+                i = skipTrivia(i, end);
+                continue;
+            }
+            if (c == QLatin1Char('"') || c == QLatin1Char('\'') || c == QLatin1Char('`')) {
+                ++i;
+                while (i < end && m_text[i] != c)
+                    i += m_text[i] == QLatin1Char('\\') ? 2 : 1;
+                i = std::min(i + 1, end);
+                continue;
+            }
+            if (c == QLatin1Char('(') || c == QLatin1Char('[') || c == QLatin1Char('{') || c == QLatin1Char('<')) {
+                if (c == QLatin1Char('{') && depth == 0 && open < 0)
+                    open = i;
+                ++depth;
+            } else if (c == QLatin1Char(')') || c == QLatin1Char(']') || c == QLatin1Char('}')
+                       || (c == QLatin1Char('>') && (i == 0 || m_text[i - 1] != QLatin1Char('=')))) {
+                depth = std::max(0, depth - 1);
+                if (c == QLatin1Char('}') && depth == 0 && open >= 0 && close < 0) {
+                    close = i;
+                    if (!literal && endsWithBlock(head(itemStart, open, false).keyword)) {
+                        finish(++i);
+                        continue;
+                    }
+                }
+            } else if (depth == 0 && (c == QLatin1Char(';') || (literal && c == QLatin1Char(',')))) {
+                finish(++i);
+                continue;
+            }
+            ++i;
+        }
+        if (itemStart < end)
+            finish(end);
+        return out;
+    }
+
+    QString item(int begin, int end, int open, int close, const QString& prefix, bool inside, bool literal) const
+    {
+        const Head h = head(begin, end, literal);
+        const bool block = open >= 0 && close > open;
+        const bool nameSpace = h.keyword == QLatin1String("namespace") || h.keyword == QLatin1String("module");
+        const bool variable = h.keyword == QLatin1String("const") || h.keyword == QLatin1String("let")
+                              || h.keyword == QLatin1String("var");
+        auto into = [&](const QString& path) {
+            return m_text.mid(begin, open + 1 - begin) + items(open + 1, close, path, true, !nameSpace)
+                   + m_text.mid(close, end - close);
+        };
+        if (!inside) {
+            // Outside: only the extension's own namespace (or object) is looked into.
+            return block && h.name == m_extension && (nameSpace || variable) ? into(QString(""))
+                                                                              : m_text.mid(begin, end - begin);
+        }
+        const bool member = literal ? !h.name.isEmpty()
+                                    : !h.name.isEmpty() && (nameSpace || variable
+                                                            || h.keyword == QLatin1String("function")
+                                                            || h.keyword == QLatin1String("class")
+                                                            || h.keyword == QLatin1String("enum"));
+        if (!member)
+            return m_text.mid(begin, end - begin);
+        const QString path = prefix + h.name;
+        if (isHidden(path))
+            return QString();
+        if (block && (nameSpace || variable || literal) && hasHiddenBelow(path))
+            return into(path + QLatin1Char('.'));
+        return m_text.mid(begin, end - begin);
+    }
+
+    const QString& m_text;
+    QString        m_extension;
+    QStringList    m_hidden;
+};
+
+} // namespace
 
 QString ScriptEngine::apiDefinition(const QString& query) const
 {
@@ -607,6 +854,9 @@ QString ScriptEngine::apiDefinition(const QString& query) const
         if (!isExtensionEnabled(extension->name()))
             continue;
         QString declaration = extension->declaration();
+        const QStringList hidden = disabledExtensionMembers(extension->name());
+        if (!hidden.isEmpty())
+            declaration = MemberFilter(declaration, extension->name(), hidden).filtered();
         if (!declaration.isEmpty() && !declaration.endsWith(QLatin1Char('\n')))
             declaration += QLatin1Char('\n');
         extensions.insert(extension->name(), declaration);
@@ -760,6 +1010,19 @@ QString unknownMember(const QString& path, const QStringList& members, QString* 
     return QString();
 }
 
+// The member a use of `path` reaches: the shortest part of it that is a
+// member ("width" of "width.toFixed"), else the path (the way to one: "draw").
+QString memberOf(const QString& path, const QStringList& members)
+{
+    QString prefix;
+    for (const QString& part : path.split(QLatin1Char('.'))) {
+        prefix = prefix.isEmpty() ? part : prefix + QLatin1Char('.') + part;
+        if (members.contains(prefix))
+            return prefix;
+    }
+    return path;
+}
+
 } // namespace
 
 ScriptEngine::Check ScriptEngine::check(const QString& code) const
@@ -826,14 +1089,38 @@ ScriptEngine::Check ScriptEngine::check(const QString& code, bool requested) con
             } else if (requested && !isExtensionAllowedForRequestedRuns(name)) {
                 message = QStringLiteral("the application does not let requested scripts use '%1'").arg(name);
             } else if (!reference.path.isEmpty()) {
-                if (!members.contains(name))
-                    members.insert(name, extension->members());
-                const QString unknown = unknownMember(reference.path, members.value(name), &closest);
-                if (!unknown.isEmpty())
-                    message = QStringLiteral("'%1' has no member '%2'").arg(name, unknown);
+                if (!members.contains(name)) {
+                    // The switched-off ones are not suggested.
+                    QStringList available = extension->members();
+                    available.erase(std::remove_if(available.begin(), available.end(),
+                                                   [this, &name](const QString& m) { return isMemberDisabled(name, m); }),
+                                    available.end());
+                    members.insert(name, available);
+                }
+                QString disabled;
+                for (const QString& part : reference.path.split(QLatin1Char('.'))) {
+                    disabled = disabled.isEmpty() ? part : disabled + QLatin1Char('.') + part;
+                    if (m_disabledMembers.value(name).contains(disabled))
+                        break;
+                }
+                if (isMemberDisabled(name, reference.path)) {
+                    message = QStringLiteral("'%1.%2' is disabled").arg(name, disabled);
+                } else {
+                    const QString unknown = unknownMember(reference.path, members.value(name), &closest);
+                    if (!unknown.isEmpty())
+                        message = QStringLiteral("'%1' has no member '%2'").arg(name, unknown);
+                }
             }
-            if (message.isEmpty())
+            if (message.isEmpty()) {
+                if (!result.extensions.contains(name))
+                    result.extensions << name;
+                const QString used = reference.path.isEmpty()
+                    ? QString()
+                    : name + QLatin1Char('.') + memberOf(reference.path, members.value(name));
+                if (!used.isEmpty() && !result.extensions.contains(used))
+                    result.extensions << used;
                 continue;
+            }
             result.phase = QStringLiteral("check");
             result.line = reference.line;
             result.message = message;
@@ -1070,6 +1357,9 @@ ScriptEngine::RunId ScriptEngine::run(const QString& code, const RunOptions& opt
         if (!isExtensionEnabled(name) || (options.external && !isExtensionAllowedForRequestedRuns(name)))
             continue;
         config.extensions.append(extension);
+        const QStringList hidden = disabledExtensionMembers(name);
+        if (!hidden.isEmpty())
+            config.hiddenMembers.insert(name, hidden);
         active->extensions.append(extension);
     }
 
@@ -1374,6 +1664,7 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
     approval.dryRun = dryRun;
     approval.methods = checked.methods;
     approval.changingMethods = checked.changingMethods;
+    approval.extensions = checked.extensions;
     approval.dynamic = checked.dynamic;
     if (!m_approvalHandler) {
         finish(scriptError(QStringLiteral("approval"),

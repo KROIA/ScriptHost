@@ -56,6 +56,20 @@ void askUser(Engine* engine, QWidget* parent, const Engine::ApprovalRequest& req
     }
     QString usesText = uses.isEmpty() ? QStringLiteral("It calls no methods of the application.")
                                       : QStringLiteral("It uses: ") + uses.join(QStringLiteral(", "));
+    // Extensions, each with the members used: "gfx (rect, present)".
+    QStringList objects;
+    for (const QString& used : request.extensions) {
+        if (used.contains(QLatin1Char('.')))
+            continue;
+        QStringList members;
+        for (const QString& member : request.extensions) {
+            if (member.startsWith(used + QLatin1Char('.')))
+                members << member.mid(used.size() + 1);
+        }
+        objects << (members.isEmpty() ? used : used + QStringLiteral(" (") + members.join(QStringLiteral(", ")) + QLatin1Char(')'));
+    }
+    if (!objects.isEmpty())
+        usesText += QStringLiteral("\nIt uses objects of the application: ") + objects.join(QStringLiteral("; "));
     if (request.dynamic)
         usesText += QStringLiteral("\nIt picks methods by computed names, so it may call others as well.");
     if (!request.args.isEmpty())

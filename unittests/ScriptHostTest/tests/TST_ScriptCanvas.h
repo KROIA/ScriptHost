@@ -51,6 +51,7 @@ public:
         ADD_TEST(TST_ScriptCanvas::testFrameLoopCoalesces);
         ADD_TEST(TST_ScriptCanvas::testHelpers);
         ADD_TEST(TST_ScriptCanvas::testDrawFunctions);
+        ADD_TEST(TST_ScriptCanvas::testMemberSwitches);
         ADD_TEST(TST_ScriptCanvas::testBenchmark);
     }
 
@@ -871,6 +872,72 @@ private:
         const QJsonObject wrong = TestSupport::runScript(field.engine,
             "try { gfx.tween(0, 1, 100, 'wobble'); } catch (e) { return e.message; }");
         TEST_COMPARE(wrong["result"].toString(), QString("gfx.tween: no easing 'wobble'"));
+    }
+
+    // gfx members switched off one by one: a function, an easing, the draw
+    // namespace with a function added after it was switched off.
+    TEST_FUNCTION(testMemberSwitches)
+    {
+        TEST_START;
+
+        Field field;
+        Engine& engine = field.engine;
+        engine.setExtensionMemberEnabled("gfx", "text", false);
+        engine.setExtensionMemberEnabled("gfx", "ease.outQuad", false);
+        engine.setExtensionMemberEnabled("gfx", "draw", false);
+        field.canvas->addDrawFunction("star", [](QPainter&, const QVariantList&) {},
+                                      "function star(x: number, y: number): void;");
+
+        Engine::Check check = engine.check("gfx.rect(1, 2, 3, 4);\ngfx.text(1, 2, 'hi');");
+        TEST_ASSERT(!check.ok);
+        TEST_COMPARE(check.line, 2);
+        TEST_COMPARE(check.message, QString("'gfx.text' is disabled"));
+        TEST_COMPARE(engine.check("gfx.draw.star(1, 2);").message, QString("'gfx.draw' is disabled"));
+        TEST_COMPARE(engine.check("gfx.tween(0, 1, 100, gfx.ease.outQuad);").message,
+                     QString("'gfx.ease.outQuad' is disabled"));
+        TEST_ASSERT(engine.check("gfx.tween(0, 1, 100, gfx.ease.inQuad);\ngfx.present();").ok);
+
+        const QString definition = engine.apiDefinition("gfx");
+        TEST_ASSERT(!definition.contains("function text("));
+        TEST_ASSERT(!definition.contains("One line of text"));
+        TEST_ASSERT(!definition.contains("In a widget, placed by align"));
+        TEST_ASSERT(!definition.contains("outQuad("));
+        TEST_ASSERT(definition.contains("inQuad(t: number): number;"));
+        TEST_ASSERT(definition.contains("inOutQuad(t: number): number;"));
+        TEST_ASSERT(!definition.contains("namespace draw"));
+        TEST_ASSERT(!definition.contains("function star("));
+        TEST_ASSERT(definition.contains("function rect(x: number, y: number, w: number, h: number, style?: Style): void;"));
+        TEST_ASSERT(definition.contains("function measureText("));
+        TEST_ASSERT(definition.contains("interface Style {"));
+        TEST_ASSERT(definition.contains("const width: number;"));
+        TEST_ASSERT(definition.trimmed().endsWith("function present(): void;\n}"));
+
+        const QJsonObject result = TestSupport::runScript(engine,
+            "return [typeof gfx.text, typeof gfx.ease.outQuad, typeof gfx.ease.inQuad, typeof gfx.draw,\n"
+            "        typeof gfx.rect, Object.isFrozen(gfx), gfx.width, gfx.tween(0, 10, 100, 'inQuad').step(50)];");
+        TEST_COMPARE(result["status"].toString(), QString("ok"));
+        const QJsonArray values = result["result"].toArray();
+        TEST_COMPARE(values.at(0).toString(), QString("undefined"));
+        TEST_COMPARE(values.at(1).toString(), QString("undefined"));
+        TEST_COMPARE(values.at(2).toString(), QString("function"));
+        TEST_COMPARE(values.at(3).toString(), QString("undefined"));
+        TEST_COMPARE(values.at(4).toString(), QString("function"));
+        TEST_ASSERT(values.at(5).toBool());
+        TEST_COMPARE(values.at(6).toInt(), 240);
+        TEST_COMPARE(values.at(7).toDouble(), 2.5);
+
+        // Drawing still works with the rest; on again, the members are back.
+        Outcome out;
+        const Engine::RunId id = field.start("gfx.rect(10, 10, 20, 20, {fill: 'red', stroke: 'none'});\ngfx.present();", out);
+        TEST_ASSERT(field.shown(id));
+        TEST_ASSERT(near(field.pixel(20, 20), Qt::red));
+        engine.setExtensionMemberEnabled("gfx", "text", true);
+        engine.setExtensionMemberEnabled("gfx", "ease.outQuad", true);
+        engine.setExtensionMemberEnabled("gfx", "draw", true);
+        TEST_ASSERT(engine.check("gfx.text(1, 2, 'hi');\ngfx.draw.star(1, 2);\ngfx.ease.outQuad(0.5);").ok);
+        TEST_ASSERT(engine.apiDefinition("gfx").contains("function star(x: number, y: number): void;"));
+        TEST_COMPARE(TestSupport::runScript(engine, "return typeof gfx.text + typeof gfx.draw.star;")["result"].toString(),
+                     QString("functionfunction"));
     }
 
     TEST_FUNCTION(testDrawFunctions)

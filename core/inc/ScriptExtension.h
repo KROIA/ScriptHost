@@ -146,6 +146,11 @@ private:
 // Requested runs (requestRun()) get the extension only when the application
 // allows it: ScriptEngine::allowExtensionForRequestedRuns().
 //
+// The application can switch off the whole extension
+// (ScriptEngine::setExtensionEnabled) or single members of it
+// (ScriptEngine::setExtensionMemberEnabled); the engine leaves them out of
+// what a run sees, so the extension need not know.
+//
 // Dry runs and checks: check() and the compile-only syntax check never call
 // createRunObject(). A dry run (RunOptions::dryRun) does, with
 // context.isDryRun() true: the per-run object must then leave the

@@ -9,8 +9,9 @@ namespace ScriptHost
 class ScriptEngine;
 
 // The built-in approval dialog for requested runs: it shows who asks, the
-// code, the arguments and the methods the script uses, and lets the user run
-// it, test-run it (a dry run, its result shown in the dialog) or decline with
+// code, the arguments, the methods the script uses and the objects of the
+// application it uses (extensions such as gfx, with their members), and lets
+// the user run it, test-run it (a dry run, its result shown in the dialog) or decline with
 // a reason. Installed as the engine's approval handler (setApprovalHandler),
 // so it replaces one set before; `parent` is the window it opens over and may
 // go away before the engine does.
