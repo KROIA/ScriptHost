@@ -436,7 +436,8 @@ QString ScriptRunner::handleCall(const QString& name, const QString& argsJson, c
 
     // ---- handled here, without asking the application
     if (method.local) {
-        if (name == QLatin1String("log")) {
+        if (name == QLatin1String("log") || name == QLatin1String("print")
+            || name == QLatin1String("console.log")) {
             const QString text = logText(argsJson);
             ++m_logLines;
             m_log << text;

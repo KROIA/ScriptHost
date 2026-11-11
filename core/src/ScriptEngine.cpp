@@ -8,6 +8,7 @@
 #include <QCryptographicHash>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFileDevice>
 #include <QFontDatabase>
 #include <QJsonDocument>
 #include <QLabel>
@@ -148,6 +149,16 @@ void ScriptEngine::registerBuiltins()
        .setGroup(group).setReadOnly(true)
        .addRawParameter(QStringLiteral("value"), QJsonObject{{"description", "What to write"}});
     add(log);
+
+    // The same as log, under the names known from elsewhere.
+    for (const char* name : {"print", "console.log"}) {
+        ScriptMethod alias(QString::fromLatin1(name));
+        alias.setDescription(QStringLiteral("The same as log: writes a line to the script log. Takes any "
+                                            "number of values."))
+             .setGroup(group).setReadOnly(true)
+             .addRawParameter(QStringLiteral("value"), QJsonObject{{"description", "What to write"}});
+        add(alias);
+    }
 
     ScriptMethod progress(QStringLiteral("progress"));
     progress.setDescription(QStringLiteral("Shows how far the script is, in the status line."))
@@ -692,6 +703,16 @@ QList<ScriptEngine::RunId> ScriptEngine::activeRuns() const
     return m_active.keys();
 }
 
+void ScriptEngine::setOutput(QIODevice* device)
+{
+    m_output = device;
+}
+
+QIODevice* ScriptEngine::output() const
+{
+    return m_output;
+}
+
 ScriptEngine::RunRecord ScriptEngine::activeRun(RunId id) const
 {
     const Run* active = m_active.value(id);
@@ -854,6 +875,14 @@ ScriptEngine::RunId ScriptEngine::run(const QString& code, const RunOptions& opt
                              payload.value("v"), payload.value("e").toString());
     });
     connect(runner, &ScriptRunner::logged, this, [this, id](const QString& text) {
+        if (m_output) {
+            const Run* current = m_active.value(id);
+            const QString name = current && !current->record.name.isEmpty() ? current->record.name
+                                                                             : QStringLiteral("#%1").arg(id);
+            m_output->write(QStringLiteral("[%1] %2\n").arg(name, text).toUtf8());
+            if (auto* file = qobject_cast<QFileDevice*>(m_output.data()))
+                file->flush();
+        }
         emit runLog(id, text);
     });
     connect(runner, &ScriptRunner::progressed, this,

@@ -45,6 +45,7 @@ include
 lib
 graphify-out
 .claude
+CLAUDE.md
 
 # Claude Code — per-machine settings, not shared.
 # Permission grants are a per-developer trust decision; each clone makes its own.

@@ -15,6 +15,7 @@
 #include <QStringList>
 #include <functional>
 
+class QIODevice;
 class QWidget;
 
 namespace ScriptHost
@@ -296,6 +297,11 @@ public:
     // The record of an active run so far, without a result yet; an empty one
     // (id 0) when the run is not active.
     RunRecord activeRun(RunId id) const;
+    // Where the log lines of all runs go besides runLog: a QFile opened on
+    // stdout, a QBuffer, a socket, ... Not owned; nullptr (default) = none,
+    // and a device that is deleted is dropped. See runLog for the format.
+    void setOutput(QIODevice* device);
+    QIODevice* output() const;
 
     // ---- Saved scripts ----------------------------------------------------
     // Where requestRun() finds scripts by name and where ScriptsWidget lists
@@ -327,6 +333,10 @@ signals:
     // Debugger: the call returned `value`, or failed with `error`.
     void runCallFinished(RunId id, int line, const QString& method, const QJsonArray& arguments,
                          const QJsonValue& value, const QString& error);
+    // A line the script wrote with log(), print() or console.log() - the
+    // values joined by spaces. Also written to output(), if set, on this
+    // thread as "[<script name, or #<id> when unnamed>] <text>\n" in UTF-8,
+    // flushed after each line when it is a QFileDevice.
     void runLog(RunId id, const QString& text);
     void runProgress(RunId id, double done, double total, const QString& text);
     void runFinished(RunId id, const QJsonObject& result);
@@ -371,6 +381,7 @@ private:
     bool        m_userMayEdit = true;
     bool        m_debuggerEnabled = true;
     QPointer<ScriptLibrary> m_library;
+    QPointer<QIODevice> m_output;
 
     QMap<RunId, Run*>   m_active;           // the runs in progress, owned
     RunId               m_lastRunId = 0;

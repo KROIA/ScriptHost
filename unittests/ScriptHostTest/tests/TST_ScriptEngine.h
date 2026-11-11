@@ -724,9 +724,9 @@ private:
         QStringList names;
         for (const ScriptHost::ScriptMethod& method : engine.methods())
             names << method.name();
-        TEST_COMPARE(names, (QStringList{"clearInterval", "clearTimeout", "db.find", "db.list", "db.read",
-                                         "db.setStatus", "log", "pause", "progress", "setInterval",
-                                         "setTimeout", "sleep"}));
+        TEST_COMPARE(names, (QStringList{"clearInterval", "clearTimeout", "console.log", "db.find", "db.list",
+                                         "db.read", "db.setStatus", "log", "pause", "print", "progress",
+                                         "setInterval", "setTimeout", "sleep"}));
     }
 
     TEST_FUNCTION(testUserSettingsAndLocks)

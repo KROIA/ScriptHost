@@ -2,10 +2,12 @@
 
 // Several scripts at once: run ids, stopping one or all, the cap on runs at
 // the same time, per-run limits, the script timers, prompt stops, the run*
-// signals' ids, the log window and the single debug run.
+// signals' ids, the log window, print() / console.log() with the output
+// device, and the single debug run.
 
 #include "UnitTest.h"
 #include "TestSupport.h"
+#include <QBuffer>
 #include <QElapsedTimer>
 #include <QList>
 #include <QMap>
@@ -39,6 +41,9 @@ public:
         ADD_TEST(TST_ScriptConcurrency::testStopDuringPureLoop);
         ADD_TEST(TST_ScriptConcurrency::testSignalsCarryTheRunId);
         ADD_TEST(TST_ScriptConcurrency::testLogKeepsTheLatestLines);
+        ADD_TEST(TST_ScriptConcurrency::testPrintAndConsoleLogAreLog);
+        ADD_TEST(TST_ScriptConcurrency::testOutputTagsEachRun);
+        ADD_TEST(TST_ScriptConcurrency::testOutputOffAndDeletedDevice);
         ADD_TEST(TST_ScriptConcurrency::testOneDebugRunAtATime);
     }
 
@@ -664,6 +669,102 @@ private:
         TEST_COMPARE(log, (QStringList{"line 7", "line 8", "line 9"}));
         TEST_COMPARE(result["log_lines"].toInt(), 10);
         TEST_COMPARE(signalled, 10);
+    }
+
+    // ---- print(), console.log() and the output device -------------------------
+
+    TEST_FUNCTION(testPrintAndConsoleLogAreLog)
+    {
+        TEST_START;
+
+        Engine engine;
+        Db db;
+        TestSupport::registerDb(engine, db);
+        QStringList signalled;
+        QObject::connect(&engine, &Engine::runLog, [&](Engine::RunId, const QString& text) { signalled << text; });
+
+        // One method call allowed: the log lines do not count.
+        const QString code = "log('a', 1);\nprint('b', {x: 2});\nconsole.log('c', 3, [4]);\n"
+                             "print();\nreturn db.list().length;";
+        TEST_ASSERT(engine.check(code).ok);
+        Options options;
+        options.maxCalls = 1;
+        const QJsonObject result = TestSupport::runScript(engine, code, options);
+        TEST_COMPARE(result["status"].toString(), QString("ok"));
+        TEST_COMPARE(result["result"].toInt(), 6);
+        const QStringList expected{"a 1", "b {\"x\":2}", "c 3 [4]", ""};
+        QStringList log;
+        for (const QJsonValue& line : result["log"].toArray())
+            log << line.toString();
+        TEST_COMPARE(log, expected);
+        TEST_COMPARE(signalled, expected);
+
+        // console is checked like any other namespace.
+        const Engine::Check wrong = engine.check("console.lg('x');");
+        TEST_ASSERT(!wrong.ok);
+        TEST_COMPARE(wrong.phase, QString("check"));
+
+        engine.setApiBudgetChars(0);
+        const QString all = engine.apiDefinition();
+        TEST_ASSERT(all.contains("declare function print("));
+        TEST_ASSERT(all.contains("declare namespace console {"));
+        TEST_ASSERT(engine.apiDefinition("console.log").contains("function log("));
+    }
+
+    TEST_FUNCTION(testOutputTagsEachRun)
+    {
+        TEST_START;
+
+        Engine engine;
+        Gate gate;
+        gate.install(engine);
+        QBuffer device;
+        device.open(QIODevice::WriteOnly);
+        engine.setOutput(&device);
+        TEST_ASSERT(engine.output() == &device);
+
+        // Both at once, their lines interleaved.
+        Options named;
+        named.name = "Report";
+        Outcome first, second;
+        start(engine, "print('one');\ngate.wait('a');\nconsole.log('two', 2);\nreturn 0;", first, named);
+        const Engine::RunId unnamed = start(engine, "log('gr\\u00fc\\u00dfe');\ngate.wait('b');\nprint('y');\nreturn 0;",
+                                            second);
+        TEST_ASSERT(TestSupport::spin([&]() { return gate.isWaiting("a") && gate.isWaiting("b"); }));
+        gate.open("b", QJsonValue());
+        gate.open("a", QJsonValue());
+        TEST_ASSERT(TestSupport::spin([&]() { return first.done && second.done; }));
+
+        const QString tag = QString("[#%1] ").arg(unnamed);
+        const QStringList lines = QString::fromUtf8(device.data()).split('\n');
+        TEST_COMPARE(lines.size(), 5);
+        TEST_COMPARE(lines.last(), QString());
+        TEST_COMPARE(lines.filter("[Report] "), (QStringList{"[Report] one", "[Report] two 2"}));
+        TEST_COMPARE(lines.filter(tag), (QStringList{tag + QString::fromUtf8("gr\xc3\xbc\xc3\x9f" "e"), tag + "y"}));
+    }
+
+    TEST_FUNCTION(testOutputOffAndDeletedDevice)
+    {
+        TEST_START;
+
+        Engine engine;
+        QBuffer device;
+        device.open(QIODevice::WriteOnly);
+        engine.setOutput(&device);
+        engine.setOutput(nullptr);
+        TEST_ASSERT(engine.output() == nullptr);
+        TEST_COMPARE(TestSupport::runScript(engine, "print('x');\nreturn 0;")["status"].toString(), QString("ok"));
+        TEST_ASSERT(device.data().isEmpty());
+
+        // A device deleted while set is dropped, not written to.
+        auto* gone = new QBuffer();
+        gone->open(QIODevice::WriteOnly);
+        engine.setOutput(gone);
+        delete gone;
+        TEST_ASSERT(engine.output() == nullptr);
+        const QJsonObject result = TestSupport::runScript(engine, "print('x');\nreturn 0;");
+        TEST_COMPARE(result["status"].toString(), QString("ok"));
+        TEST_COMPARE(result["log"].toArray().size(), 1);
     }
 
     // ---- the debugger ------------------------------------------------------------
