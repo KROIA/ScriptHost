@@ -5,8 +5,9 @@
 // Widgets are found by object name:
 //   widget: scripthost_scriptsEnabled, scripthost_scriptsEnabledHint, scripthost_scriptsApproval,
 //           scripthost_scriptsApprovalHint, scripthost_scriptsTable, scripthost_scriptsNew,
-//           scripthost_scriptsDelete, scripthost_scriptsMethod_<name>, scripthost_scriptsRuns,
-//           scripthost_scriptsRunDetails, scripthost_scriptsRunsClear
+//           scripthost_scriptsDelete, scripthost_scriptsMethod_<name>, scripthost_scriptsActiveRuns,
+//           scripthost_scriptsActiveRunStop (one per active run, in the table's last column),
+//           scripthost_scriptsRuns, scripthost_scriptsRunDetails, scripthost_scriptsRunsClear
 //   editor: scripthost_scriptEditorName, scripthost_scriptEditorCode, scripthost_scriptEditorArgs,
 //           scripthost_scriptEditorStatus, scripthost_scriptEditorRun, scripthost_scriptEditorStep,
 //           scripthost_scriptEditorContinue, scripthost_scriptEditorStop, scripthost_scriptEditorSave,
@@ -42,6 +43,8 @@ public:
         ADD_TEST(TST_ScriptsWidget::testEditorDebug);
         ADD_TEST(TST_ScriptsWidget::testEditorReference);
         ADD_TEST(TST_ScriptsWidget::testRuns);
+        ADD_TEST(TST_ScriptsWidget::testActiveRuns);
+        ADD_TEST(TST_ScriptsWidget::testTwoEditorsRunAtOnce);
     }
 
 private:
@@ -573,6 +576,137 @@ private:
         widget.findChild<QPushButton*>("scripthost_scriptsRunsClear")->click();
         TEST_COMPARE(runs->rowCount(), 0);
         TEST_ASSERT(details->toPlainText().isEmpty());
+    }
+
+    // The runs going on now: a row each, with a Stop button that stops that
+    // run only; a row goes when its run ends.
+    TEST_FUNCTION(testActiveRuns)
+    {
+        TEST_START;
+
+        Engine engine;
+        ScriptHost::ScriptsWidget widget;
+        widget.setScripting(&engine);
+        auto* active = widget.findChild<QTableWidget*>("scripthost_scriptsActiveRuns");
+        TEST_ASSERT(active);
+        if (!active)
+            return;
+        TEST_COMPARE(active->rowCount(), 0);
+        auto names = [active]() {
+            QStringList text;
+            for (int row = 0; row < active->rowCount(); ++row)
+                text << active->item(row, 0)->text();
+            return text;
+        };
+
+        QMap<QString, QJsonObject> ended;
+        auto start = [&](const QString& name, const QString& code) {
+            TestSupport::Options options;
+            options.name = name;
+            return engine.run(code, options, [&ended, name](const QJsonObject& r) { ended.insert(name, r); });
+        };
+        const Engine::RunId alpha = start("Alpha", "sleep(60000);\nreturn 'a';");
+        const Engine::RunId beta = start("Beta", "sleep(60000);\nreturn 'b';");
+        start("Gamma", "sleep(100);\nreturn 'c';");
+        TEST_COMPARE(names(), (QStringList{"Alpha", "Beta", "Gamma"}));
+        TEST_COMPARE(active->item(0, 1)->text(), QString("the user"));
+
+        // Gamma ends by itself: its row goes.
+        TEST_ASSERT(TestSupport::spin([&]() { return ended.contains("Gamma"); }));
+        TEST_COMPARE(ended["Gamma"]["result"].toString(), QString("c"));
+        TEST_COMPARE(names(), (QStringList{"Alpha", "Beta"}));
+
+        // Beta's Stop stops Beta, not Alpha.
+        auto* stopBeta = qobject_cast<QPushButton*>(active->cellWidget(1, 4));
+        TEST_ASSERT(stopBeta && stopBeta->objectName() == "scripthost_scriptsActiveRunStop");
+        if (!stopBeta)
+            return;
+        stopBeta->click();
+        TEST_ASSERT(TestSupport::spin([&]() { return ended.contains("Beta"); }, 5000));
+        TEST_COMPARE(ended["Beta"]["phase"].toString(), QString("cancelled"));
+        TEST_ASSERT(!engine.isRunning(beta));
+        TEST_ASSERT(engine.isRunning(alpha));
+        TEST_ASSERT(!ended.contains("Alpha"));
+        TEST_COMPARE(names(), QStringList{"Alpha"});
+
+        // A requested run says so.
+        engine.setRequesterName("the assistant");
+        bool requestDone = false;
+        engine.requestRun(TestSupport::codeRequest("sleep(60000);"), [&](const QJsonObject&) { requestDone = true; });
+        TEST_COMPARE(active->rowCount(), 2);
+        if (active->rowCount() == 2) {
+            TEST_COMPARE(active->item(1, 1)->text(), QString("requested by the assistant"));
+        }
+
+        widget.resize(720, 420);
+        TestSupport::grab(&widget, "active_runs.png");
+
+        auto* stopAlpha = qobject_cast<QPushButton*>(active->cellWidget(0, 4));
+        TEST_ASSERT(stopAlpha);
+        if (!stopAlpha)
+            return;
+        stopAlpha->click();
+        TEST_ASSERT(TestSupport::spin([&]() { return ended.contains("Alpha"); }, 5000));
+        TEST_COMPARE(ended["Alpha"]["phase"].toString(), QString("cancelled"));
+        TEST_ASSERT(!requestDone);
+        engine.stopAll();
+        TEST_ASSERT(TestSupport::spin([&]() { return requestDone; }, 5000));
+        TEST_COMPARE(active->rowCount(), 0);
+    }
+
+    // Two editors, each running its script: each sees its own run only, and
+    // each Stop stops its own.
+    TEST_FUNCTION(testTwoEditorsRunAtOnce)
+    {
+        TEST_START;
+
+        Engine engine;
+        ScriptHost::ScriptEditorDialog one(&engine);
+        ScriptHost::ScriptEditorDialog two(&engine);
+        auto* codeOne = one.findChild<QPlainTextEdit*>("scripthost_scriptEditorCode");
+        auto* codeTwo = two.findChild<QPlainTextEdit*>("scripthost_scriptEditorCode");
+        auto* outputOne = one.findChild<QPlainTextEdit*>("scripthost_scriptEditorOutput");
+        auto* outputTwo = two.findChild<QPlainTextEdit*>("scripthost_scriptEditorOutput");
+        auto* stopOne = one.findChild<QPushButton*>("scripthost_scriptEditorStop");
+        auto* stopTwo = two.findChild<QPushButton*>("scripthost_scriptEditorStop");
+        TEST_ASSERT(codeOne && codeTwo && outputOne && outputTwo && stopOne && stopTwo);
+        if (!codeOne || !codeTwo || !outputOne || !outputTwo || !stopOne || !stopTwo)
+            return;
+
+        codeOne->setPlainText("log('from one');\nsleep(60000);\nreturn 1;");
+        codeTwo->setPlainText("log('from two');\nsleep(60000);\nreturn 2;");
+        TEST_ASSERT(one.runScript());
+        TEST_ASSERT(two.runScript());
+        TEST_ASSERT(one.isOwnRunActive() && two.isOwnRunActive());
+        TEST_COMPARE(engine.activeRuns().size(), 2);
+        TEST_ASSERT(stopOne->isEnabled() && stopTwo->isEnabled());
+        TEST_ASSERT(TestSupport::spin([&]() {
+            return outputOne->toPlainText().contains("from one") && outputTwo->toPlainText().contains("from two");
+        }));
+        TEST_ASSERT(!outputOne->toPlainText().contains("from two"));
+        TEST_ASSERT(!outputTwo->toPlainText().contains("from one"));
+
+        // Stop in the second window: only its run ends.
+        stopTwo->click();
+        TEST_ASSERT(TestSupport::spin([&]() { return !two.isOwnRunActive(); }, 5000));
+        TEST_ASSERT(outputTwo->toPlainText().contains("cancelled"));
+        TEST_ASSERT(one.isOwnRunActive());
+        TEST_COMPARE(engine.activeRuns().size(), 1);
+        TEST_ASSERT(stopOne->isEnabled());
+        TEST_ASSERT(!stopTwo->isEnabled());
+        TEST_ASSERT(!outputOne->toPlainText().contains("cancelled"));
+
+        // The second window runs again while the first still runs.
+        codeTwo->setPlainText("return 22;");
+        TEST_ASSERT(two.runScript());
+        TEST_ASSERT(TestSupport::spin([&]() { return !two.isOwnRunActive(); }));
+        TEST_ASSERT(outputTwo->toPlainText().contains("\"result\": 22"));
+        TEST_ASSERT(one.isOwnRunActive());
+
+        stopOne->click();
+        TEST_ASSERT(TestSupport::spin([&]() { return !one.isOwnRunActive(); }, 5000));
+        TEST_ASSERT(outputOne->toPlainText().contains("cancelled"));
+        TEST_ASSERT(!engine.isRunning());
     }
 };
 
