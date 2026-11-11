@@ -725,7 +725,7 @@ private:
         for (const ScriptHost::ScriptMethod& method : engine.methods())
             names << method.name();
         TEST_COMPARE(names, (QStringList{"clearInterval", "clearTimeout", "console.log", "db.find", "db.list",
-                                         "db.read", "db.setStatus", "log", "pause", "print", "progress",
+                                         "db.read", "db.setStatus", "log", "off", "on", "pause", "print", "progress",
                                          "setInterval", "setTimeout", "sleep"}));
     }
 

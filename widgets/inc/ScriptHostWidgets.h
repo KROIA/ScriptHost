@@ -4,4 +4,5 @@
 #include "ScriptHost.h"
 #include "ScriptApprovalDialog.h"
 #include "ScriptEditorDialog.h"
+#include "ScriptInput.h"
 #include "ScriptsWidget.h"

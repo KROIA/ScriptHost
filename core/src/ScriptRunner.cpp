@@ -25,6 +25,7 @@ const char* const kScriptFile = "script";
 // run(fn, argsJson): calls the script and reports what happened as JSON text -
 // a `throw "text"` is otherwise indistinguishable from a returned string.
 const char* const kPrelude = R"JS((function(native){
+    var handlers = {};      // event name -> [fn, ...]
     return {
         make: function(name, trace){
             return function(){
@@ -46,6 +47,31 @@ const char* const kPrelude = R"JS((function(native){
             };
         },
         clear: function(id){ native.clearTimer(Number(id) || 0); },
+        // on(name, fn) / off(name, fn?): the event handlers. deliver(name)
+        // gives the function the runner calls with an event's data.
+        on: function(name, fn){
+            if (typeof fn !== 'function') throw new TypeError('the second argument must be a function');
+            name = String(name);
+            if (!native.listen(name, true))
+                throw new Error("the application does not let requested scripts receive '" + name + "' events");
+            (handlers[name] = handlers[name] || []).push(fn);
+        },
+        off: function(name, fn){
+            name = String(name);
+            var list = handlers[name];
+            if (!list) return;
+            if (fn === undefined) list.length = 0;
+            else if (list.indexOf(fn) >= 0) list.splice(list.indexOf(fn), 1);
+            if (list.length) return;
+            delete handlers[name];
+            native.listen(name, false);
+        },
+        deliver: function(name){
+            return function(data){
+                var list = (handlers[name] || []).slice();
+                for (var i = 0; i < list.length; ++i) list[i](data);
+            };
+        },
         // The variables a statement's reader gives, as {"name": "value as text"}.
         vars: function(read){
             var text = function(v){
@@ -276,6 +302,8 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         else if (method.local && (method.name == QLatin1String("clearTimeout")
                                   || method.name == QLatin1String("clearInterval")))
             callable = clear;
+        else if (method.local && (method.name == QLatin1String("on") || method.name == QLatin1String("off")))
+            callable = prelude.property(method.name);
         else
             callable = make.call({method.name, m_config.debug});
         const int dot = method.name.indexOf(QLatin1Char('.'));
@@ -300,33 +328,49 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
     if (payload.value(QStringLiteral("u")).toBool() && !m_config.dryRun)
         result["note"] = "the script returned nothing; use `return` to hand back a value";
 
-    // The timers keep the run alive. Waited for like sleep(), so that a stop
-    // wakes the wait at once.
+    // The timers and the event handlers keep the run alive. Waited for like
+    // sleep(), so that a stop wakes the wait at once, and so does an event.
+    // Events go first, in the order they were posted.
     // ponytail: the next timer is found by a scan of all of them; a heap
     // when scripts keep thousands of timers.
-    while (!m_timers.isEmpty()) {
+    QJSValue deliver = prelude.property(QStringLiteral("deliver"));
+    for (;;) {
         auto next = m_timers.begin();
         for (auto it = m_timers.begin(); it != m_timers.end(); ++it) {
             if (it.value().due < next.value().due)
                 next = it;
         }
+        bool hasEvent = false;
+        QPair<QString, QString> event;
         {
-            QDeadlineTimer deadline(qMax(qint64(0), next.value().due - m_clock.elapsed()));
             QMutexLocker lock(&m_shared->mutex);
-            while (!m_shared->stop && !deadline.hasExpired())
+            if (m_timers.isEmpty() && m_shared->listening.isEmpty())
+                break;
+            const QDeadlineTimer deadline = m_timers.isEmpty()
+                ? QDeadlineTimer(QDeadlineTimer::Forever)
+                : QDeadlineTimer(qMax(qint64(0), next.value().due - m_clock.elapsed()));
+            while (!m_shared->stop && m_shared->events.isEmpty() && !deadline.hasExpired())
                 m_shared->wake.wait(&m_shared->mutex, deadline);
+            hasEvent = !m_shared->events.isEmpty();
+            if (hasEvent)
+                event = m_shared->events.takeFirst();
         }
         if (stopRequested(&reason))
             return stoppedResult(reason);
-        // Due again before it runs, so that the function may clear its own timer.
-        const QJSValue fn = next.value().fn;
-        if (next.value().interval > 0)
-            next.value().due = m_clock.elapsed() + next.value().interval;
-        else
-            m_timers.erase(next);
-        const QJsonObject failedTimer = failure(runFunction.call({fn, QStringLiteral("null")}), payload);
-        if (!failedTimer.isEmpty())
-            return failedTimer;
+        QJsonObject failedCall;
+        if (hasEvent) {
+            failedCall = failure(runFunction.call({deliver.call({event.first}), event.second}), payload);
+        } else {
+            // Due again before it runs, so that the function may clear its own timer.
+            const QJSValue fn = next.value().fn;
+            if (next.value().interval > 0)
+                next.value().due = m_clock.elapsed() + next.value().interval;
+            else
+                m_timers.erase(next);
+            failedCall = failure(runFunction.call({fn, QStringLiteral("null")}), payload);
+        }
+        if (!failedCall.isEmpty())
+            return failedCall;
     }
     return result;
 }
@@ -377,6 +421,18 @@ void ScriptRunner::clearTimer(double id)
     // Whatever number the script passes; only an id it was given counts.
     if (id >= 1 && id <= double(m_lastTimerId))
         m_timers.remove(qint64(id));
+}
+
+bool ScriptRunner::listen(const QString& name, bool on)
+{
+    if (on && m_config.requested && !m_config.requestedEvents.contains(name))
+        return false;
+    QMutexLocker lock(&m_shared->mutex);
+    if (on)
+        m_shared->listening.insert(name);
+    else
+        m_shared->listening.remove(name);
+    return true;
 }
 
 bool ScriptRunner::waitWhilePaused(int line, const QString& name, const QString& argsJson)

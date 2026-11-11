@@ -218,7 +218,8 @@ public:
         QSet<int>   breakpoints;        // debugger: stop at these lines - before a
                                         // call there, with `statements` before the
                                         // statement
-        bool        external = false;   // for the record: started through requestRun()
+        bool        external = false;   // started through requestRun(): for the record, and
+                                        // it gets only allowEventForRequestedRuns() events
         bool        readOnlyOnly = false;    // a changing method fails the script
         int         timeoutMs = -1;     // -1 = Limits::timeoutMs, 0 = no limit; not
                                         // applied in the debugger
@@ -253,6 +254,31 @@ public:
     // Nothing happens for an id that is not active.
     void stop(RunId id);
     void stopAll();
+
+    // ---- Events -----------------------------------------------------------
+    // A script subscribes with on(name, fn) and unsubscribes with
+    // off(name, fn) or off(name) (every handler of the name). postEvent()
+    // hands `data` to every active run with a handler for `name`, or to the
+    // one run `id`; a run without one does not get it, not even later. Each
+    // run calls its handlers on its own thread, with `data` as a plain
+    // object, in the order the events were posted - once its body has
+    // returned, between its timers. An event is not a method call and does
+    // not count toward maxCalls. A run with a handler goes on running after
+    // its body returned, like one with timers, until off() removed the last
+    // handler and no timer is left, it is stopped or it reaches its time
+    // limit; an exception thrown in a handler ends the run as a "runtime"
+    // error. ScriptHostWidgets posts "key" and "mouse": forwardInput().
+    void postEvent(const QString& name, const QJsonObject& data);
+    void postEvent(RunId id, const QString& name, const QJsonObject& data);
+    // A requested run (requestRun(), or RunOptions::external) gets no event
+    // whose name is not allowed here: its on() for that name throws. Nothing
+    // is allowed by default. A run keeps what was allowed when it started.
+    void allowEventForRequestedRuns(const QString& name, bool allow = true);
+    bool isEventAllowedForRequestedRuns(const QString& name) const;
+    // While a method's handler runs: the run that called it, else 0. An
+    // asynchronous handler sees it only until it returns. With
+    // isExternalRun(), a handler can treat requested runs apart.
+    RunId callingRun() const { return m_callingRun; }
 
     struct Request
     {
@@ -383,9 +409,11 @@ private:
     bool        m_debuggerEnabled = true;
     QPointer<ScriptLibrary> m_library;
     QPointer<QIODevice> m_output;
+    QSet<QString>       m_requestedEvents;  // allowEventForRequestedRuns()
 
     QMap<RunId, Run*>   m_active;           // the runs in progress, owned
     RunId               m_lastRunId = 0;
+    RunId               m_callingRun = 0;   // callingRun()
     QList<RunRecord>    m_runs;
 };
 

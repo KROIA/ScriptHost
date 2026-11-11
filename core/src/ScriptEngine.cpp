@@ -7,6 +7,7 @@
 #include <QFileDevice>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QScopedValueRollback>
 #include <QTimer>
 #include <algorithm>
 #include <atomic>
@@ -199,6 +200,24 @@ void ScriptEngine::registerBuiltins()
                 .setGroup(group).setReadOnly(true)
                 .addParameter(QStringLiteral("id"), QStringLiteral("number"), QStringLiteral("What setTimeout returned"));
     add(clearTimeout);
+
+    // Events. Handled by the runner, which keeps the handlers in JavaScript.
+    ScriptMethod on(QStringLiteral("on"));
+    on.setDescription(QStringLiteral("Calls fn with the data of each event of this name the application posts, "
+                                     "after the script's end. The script runs on until it has no handler and "
+                                     "no timer left."))
+      .setGroup(group).setReadOnly(true)
+      .addParameter(QStringLiteral("name"), QStringLiteral("string"),
+                    QStringLiteral("The event, e.g. \"key\" or \"mouse\""))
+      .addRawParameter(QStringLiteral("fn"), QJsonObject{{"description", "Called with the event's data"}});
+    add(on);
+
+    ScriptMethod off(QStringLiteral("off"));
+    off.setDescription(QStringLiteral("Removes fn as a handler of the event; without fn, every handler of it."))
+       .setGroup(group).setReadOnly(true)
+       .addParameter(QStringLiteral("name"), QStringLiteral("string"), QStringLiteral("The event"))
+       .addRawParameter(QStringLiteral("fn"), QJsonObject{{"description", "The handler given to on()"}}, false);
+    add(off);
 
     ScriptMethod clearInterval(QStringLiteral("clearInterval"));
     clearInterval.setDescription(QStringLiteral("Stops a timer of setInterval."))
@@ -722,6 +741,46 @@ void ScriptEngine::stopAll()
         active->runner->requestStop(QStringLiteral("cancelled"));
 }
 
+namespace
+{
+
+void queueEvent(ScriptRunShared& shared, const QString& name, const QString& json)
+{
+    QMutexLocker lock(&shared.mutex);
+    if (!shared.listening.contains(name))
+        return;
+    shared.events.append({name, json});
+    shared.wake.wakeAll();
+}
+
+} // namespace
+
+void ScriptEngine::postEvent(const QString& name, const QJsonObject& data)
+{
+    const QString json = compactJson(data);
+    for (const Run* active : std::as_const(m_active))
+        queueEvent(*active->shared, name, json);
+}
+
+void ScriptEngine::postEvent(RunId id, const QString& name, const QJsonObject& data)
+{
+    if (const Run* active = m_active.value(id))
+        queueEvent(*active->shared, name, compactJson(data));
+}
+
+void ScriptEngine::allowEventForRequestedRuns(const QString& name, bool allow)
+{
+    if (allow)
+        m_requestedEvents.insert(name);
+    else
+        m_requestedEvents.remove(name);
+}
+
+bool ScriptEngine::isEventAllowedForRequestedRuns(const QString& name) const
+{
+    return m_requestedEvents.contains(name);
+}
+
 ScriptEngine::Run* ScriptEngine::debugRun() const
 {
     for (Run* active : m_active) {
@@ -804,6 +863,8 @@ ScriptEngine::RunId ScriptEngine::run(const QString& code, const RunOptions& opt
     config.debug = options.debug;
     config.statements = options.debug && options.statements;
     config.readOnlyOnly = options.readOnlyOnly;
+    config.requested = options.external;
+    config.requestedEvents = m_requestedEvents;
 
     const RunId id = ++m_lastRunId;
     Run* active = new Run;
@@ -934,6 +995,7 @@ void ScriptEngine::onCallRequested(RunId id, quint64 call, const QString& name, 
         return;
     }
     const Entry entry = it.value();
+    const QScopedValueRollback<RunId> calling(m_callingRun, id);
 
     QJsonObject args;
     QString problem;

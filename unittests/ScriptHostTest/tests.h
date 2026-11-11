@@ -5,3 +5,5 @@
 #include "tests/TST_ScriptLibrary.h"
 #include "tests/TST_ScriptsWidget.h"
 #include "tests/TST_ScriptConcurrency.h"
+#include "tests/TST_ScriptEvents.h"
+#include "tests/TST_ScriptInput.h"

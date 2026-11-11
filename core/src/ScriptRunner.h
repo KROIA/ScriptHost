@@ -9,6 +9,7 @@
 #include <QList>
 #include <QMap>
 #include <QMutex>
+#include <QPair>
 #include <QSet>
 #include <QSharedPointer>
 #include <QString>
@@ -44,6 +45,8 @@ struct ScriptRunConfig
     bool debug = false;         // stops at calls on request, reports every call
     bool statements = false;    // debug: stops before statements too, reads variables
     bool readOnlyOnly = false;  // a method that changes something fails the script
+    bool requested = false;     // started through requestRun(): on() only for requestedEvents
+    QSet<QString> requestedEvents;
 };
 
 // State both threads touch, under `mutex`.
@@ -64,6 +67,10 @@ struct ScriptRunShared
     // While paused: 0 wait, else go on - 1 to the next call, 2 to the next
     // breakpoint, 3 to the next statement.
     int            resume = 0;
+    // Events: the names the script has handlers for, and those posted to it
+    // and not yet delivered, as (name, data as JSON text).
+    QSet<QString>                 listening;
+    QList<QPair<QString, QString>> events;
 };
 
 class ScriptRunner : public QThread
@@ -89,6 +96,9 @@ public:
     // thread). `fn` takes no arguments; the prelude binds them.
     double addTimer(const QJSValue& fn, double ms, bool repeat);
     void clearTimer(double id);
+    // on() / off(): the script has handlers for the event `name` (on) or no
+    // more (worker thread). False when the run may not receive it.
+    bool listen(const QString& name, bool on);
 
 signals:
     // The script calls a method of the application; answer through the shared state.
@@ -161,6 +171,7 @@ public:
     Q_INVOKABLE void step(int line, const QJSValue& read) { m_runner->handleStep(line, read); }
     Q_INVOKABLE double timer(const QJSValue& fn, double ms, bool repeat) { return m_runner->addTimer(fn, ms, repeat); }
     Q_INVOKABLE void clearTimer(double id) { m_runner->clearTimer(id); }
+    Q_INVOKABLE bool listen(const QString& name, bool on) { return m_runner->listen(name, on); }
 
 private:
     ScriptRunner* m_runner;
