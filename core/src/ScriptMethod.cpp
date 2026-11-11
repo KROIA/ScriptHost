@@ -68,6 +68,19 @@ QString typeOfSchema(const QJsonObject& schema, int depth)
             values << compactJson(v);
         return values.join(QStringLiteral(" | "));
     }
+    // "type": ["integer", "string"] -> "number | string".
+    const QJsonArray types = schema.value(QStringLiteral("type")).toArray();
+    if (!types.isEmpty()) {
+        QStringList names;
+        for (const QJsonValue& t : types) {
+            QJsonObject single = schema;
+            single.insert(QStringLiteral("type"), t);
+            const QString name = typeOfSchema(single, depth);
+            if (!names.contains(name))
+                names << name;
+        }
+        return names.join(QStringLiteral(" | "));
+    }
     const QString type = schema.value(QStringLiteral("type")).toString();
     if (type == QLatin1String("string") || type == QLatin1String("boolean"))
         return type;

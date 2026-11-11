@@ -7,3 +7,4 @@
 #include "ScriptEditorDialog.h"
 #include "ScriptInput.h"
 #include "ScriptsWidget.h"
+#include "ScriptUi.h"

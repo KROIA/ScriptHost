@@ -1,6 +1,7 @@
 #include "ScriptApprovalDialog.h"
 #include "ScriptEngine.h"
 #include "ScriptHighlighter.h"
+#include "ScriptUi.h"
 #include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -26,6 +27,7 @@ void askUser(Engine* engine, QWidget* parent, const Engine::ApprovalRequest& req
 {
     QDialog dialog(parent);
     dialog.setObjectName(QStringLiteral("scripthost_scriptApprovalDialog"));
+    ScriptUi::hideWidget(&dialog);  // scripts must not read what they are to be approved for
     dialog.setWindowTitle(QStringLiteral("Run script?"));
     dialog.resize(640, 520);
     auto* layout = new QVBoxLayout(&dialog);
