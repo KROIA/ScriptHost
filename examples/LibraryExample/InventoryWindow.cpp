@@ -129,8 +129,9 @@ void InventoryWindow::setUpScripting()
     // the user reads: "Allow the remote client to run scripts", "Requested by
     // the remote client: run this script?".
     m_engine->setRequesterName("the remote client");
-    // The approval dialog opens over this window.
-    m_engine->setDialogParent(this);
+    // Requested runs that need approval ask the user in the built-in dialog
+    // (ScriptHostWidgets), over this window.
+    ScriptHost::useApprovalDialog(m_engine, this);
 
     // ---- 2. The methods ---------------------------------------------------
     registerMethods();

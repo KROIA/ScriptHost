@@ -42,7 +42,7 @@ class ScriptCodeEdit;
 //   scripthost_scriptEditorStop, scripthost_scriptEditorSave, scripthost_scriptEditorClose,
 //   scripthost_scriptEditorOutputTabs, scripthost_scriptEditorOutput, scripthost_scriptEditorCalls,
 //   scripthost_scriptEditorReferenceSearch, scripthost_scriptEditorReference, scripthost_scriptEditorReferenceText
-class SCRIPT_HOST_API ScriptEditorDialog : public QDialog
+class SCRIPT_HOST_WIDGETS_API ScriptEditorDialog : public QDialog
 {
     Q_OBJECT
 public:

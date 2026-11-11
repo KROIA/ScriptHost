@@ -1,23 +1,13 @@
 #include "ScriptEngine.h"
-#include "ScriptHighlighter.h"
 #include "ScriptLibrary.h"
 #include "ScriptRunner.h"
 #include "ScriptSchema.h"
 #include "ScriptSource.h"
-#include <QCheckBox>
 #include <QCryptographicHash>
-#include <QDialog>
-#include <QDialogButtonBox>
 #include <QFileDevice>
-#include <QFontDatabase>
 #include <QJsonDocument>
-#include <QLabel>
-#include <QLineEdit>
-#include <QPlainTextEdit>
-#include <QPushButton>
 #include <QRegularExpression>
 #include <QTimer>
-#include <QVBoxLayout>
 #include <algorithm>
 #include <atomic>
 #include <utility>
@@ -316,11 +306,6 @@ bool ScriptEngine::setApprovalRequiredByUser(ScriptKind kind, bool required)
 void ScriptEngine::setApprovalHandler(ApprovalHandler handler)
 {
     m_approvalHandler = std::move(handler);
-}
-
-void ScriptEngine::setDialogParent(QWidget* parent)
-{
-    m_dialogParent = parent;
 }
 
 void ScriptEngine::setLimits(const Limits& limits)
@@ -986,126 +971,6 @@ void ScriptEngine::onCallRequested(RunId id, quint64 call, const QString& name, 
     }
 }
 
-// ------------------------------------------------------------ approval
-
-void ScriptEngine::askApproval(const ApprovalRequest& request,
-                            std::function<void(const ApprovalDecision&)> decide)
-{
-    if (m_approvalHandler) {
-        m_approvalHandler(request, std::move(decide));
-        return;
-    }
-
-    QDialog dialog(m_dialogParent);
-    dialog.setObjectName(QStringLiteral("scripthost_scriptApprovalDialog"));
-    dialog.setWindowTitle(QStringLiteral("Run script?"));
-    dialog.resize(640, 520);
-    auto* layout = new QVBoxLayout(&dialog);
-
-    QString headline = request.name.isEmpty()
-        ? QStringLiteral("Requested by %1: run this script?").arg(m_requesterName)
-        : QStringLiteral("Requested by %1: run the saved script \"%2\"?").arg(m_requesterName, request.name);
-    if (request.dryRun)
-        headline += QStringLiteral(" It is a dry run: nothing will be changed.");
-    auto* headlineLabel = new QLabel(headline, &dialog);
-    headlineLabel->setObjectName(QStringLiteral("scripthost_scriptApprovalHeadline"));
-    headlineLabel->setWordWrap(true);
-    layout->addWidget(headlineLabel);
-
-    auto* code = new QPlainTextEdit(&dialog);
-    code->setObjectName(QStringLiteral("scripthost_scriptApprovalCode"));
-    code->setReadOnly(true);
-    code->setLineWrapMode(QPlainTextEdit::NoWrap);
-    code->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    new JsHighlighter(code->document());
-    code->setPlainText(request.code);
-    layout->addWidget(code, 1);
-
-    QStringList uses;
-    for (const QString& method : request.methods) {
-        uses << (request.changingMethods.contains(method) ? method + QStringLiteral(" (changes)")
-                                                          : method + QStringLiteral(" (reads)"));
-    }
-    QString usesText = uses.isEmpty() ? QStringLiteral("It calls no methods of the application.")
-                                      : QStringLiteral("It uses: ") + uses.join(QStringLiteral(", "));
-    if (request.dynamic)
-        usesText += QStringLiteral("\nIt picks methods by computed names, so it may call others as well.");
-    if (!request.args.isEmpty())
-        usesText += QStringLiteral("\nArguments: ")
-                    + QString::fromUtf8(QJsonDocument(request.args).toJson(QJsonDocument::Compact));
-    auto* usesLabel = new QLabel(usesText, &dialog);
-    usesLabel->setObjectName(QStringLiteral("scripthost_scriptApprovalUses"));
-    usesLabel->setWordWrap(true);
-    layout->addWidget(usesLabel);
-
-    auto* output = new QPlainTextEdit(&dialog);
-    output->setObjectName(QStringLiteral("scripthost_scriptApprovalOutput"));
-    output->setReadOnly(true);
-    output->setMaximumHeight(110);
-    output->hide();
-    layout->addWidget(output);
-
-    auto* remember = new QCheckBox(QStringLiteral("Do not ask again for this script in this session"), &dialog);
-    remember->setObjectName(QStringLiteral("scripthost_scriptApprovalRemember"));
-    layout->addWidget(remember);
-
-    auto* reason = new QLineEdit(&dialog);
-    reason->setObjectName(QStringLiteral("scripthost_scriptApprovalReason"));
-    reason->setPlaceholderText(QStringLiteral("When declining: the reason to pass on (optional)"));
-    layout->addWidget(reason);
-
-    auto* buttons = new QDialogButtonBox(&dialog);
-    QPushButton* runButton = buttons->addButton(QStringLiteral("Run"), QDialogButtonBox::AcceptRole);
-    runButton->setObjectName(QStringLiteral("scripthost_scriptApprovalRun"));
-    QPushButton* declineButton = buttons->addButton(QStringLiteral("Decline"), QDialogButtonBox::RejectRole);
-    declineButton->setObjectName(QStringLiteral("scripthost_scriptApprovalDecline"));
-    QPushButton* testButton = buttons->addButton(QStringLiteral("Test run"), QDialogButtonBox::ActionRole);
-    testButton->setObjectName(QStringLiteral("scripthost_scriptApprovalTest"));
-    testButton->setToolTip(QStringLiteral("Runs the script without changing anything and shows what it would do"));
-    testButton->setVisible(!request.dryRun);
-    layout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    RunId testRun = 0;
-    connect(testButton, &QPushButton::clicked, &dialog, [this, request, output, testButton, runButton, &testRun]() {
-        RunOptions options;
-        options.name = request.name;
-        options.args = request.args;
-        options.dryRun = true;
-        testButton->setEnabled(false);
-        runButton->setEnabled(false);
-        QPointer<QPlainTextEdit> out(output);
-        QPointer<QPushButton> test(testButton), runAgain(runButton);
-        testRun = run(request.code, options, [out, test, runAgain](const QJsonObject& result) {
-            if (!out)
-                return;
-            out->setPlainText(QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented)));
-            out->show();
-            test->setEnabled(true);
-            runAgain->setEnabled(true);
-        });
-    });
-
-    ApprovalDecision decision;
-    decision.approved = dialog.exec() == QDialog::Accepted;
-    decision.reason = reason->text().trimmed();
-    decision.rememberForSession = decision.approved && remember->isChecked();
-    // A test run still going when the dialog closes must not block the real
-    // one: it is stopped, and the decision takes effect once it has ended.
-    if (isRunning(testRun)) {
-        stop(testRun);
-        auto* once = new QObject(this);
-        connect(this, &ScriptEngine::runFinished, once, [once, testRun, decide, decision](RunId id) {
-            if (id != testRun)
-                return;
-            once->deleteLater();
-            decide(decision);
-        });
-        return;
-    }
-    decide(decision);
-}
-
 // ------------------------------------------------------------ user settings
 
 QJsonObject ScriptEngine::userSettings() const
@@ -1242,7 +1107,13 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
     approval.methods = checked.methods;
     approval.changingMethods = checked.changingMethods;
     approval.dynamic = checked.dynamic;
-    askApproval(approval, [self, hash, start, finish, abandoned](const ApprovalDecision& decision) {
+    if (!m_approvalHandler) {
+        finish(scriptError(QStringLiteral("approval"),
+                           QStringLiteral("the script needs the user's approval, and the application "
+                                          "set no approval handler to ask for it")));
+        return;
+    }
+    m_approvalHandler(approval, [self, hash, start, finish, abandoned](const ApprovalDecision& decision) {
         if (!self || (abandoned && abandoned()))
             return;     // nobody is waiting for this run any more
         if (!decision.approved) {

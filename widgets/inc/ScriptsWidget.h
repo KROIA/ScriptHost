@@ -43,7 +43,7 @@ class ScriptLibrary;
 //   scripthost_scriptsMethod_<method name>, scripthost_scriptsActiveRuns,
 //   scripthost_scriptsActiveRunStop (one per active run), scripthost_scriptsRuns,
 //   scripthost_scriptsRunDetails, scripthost_scriptsRunsClear
-class SCRIPT_HOST_API ScriptsWidget : public QWidget
+class SCRIPT_HOST_WIDGETS_API ScriptsWidget : public QWidget
 {
     Q_OBJECT
 public:

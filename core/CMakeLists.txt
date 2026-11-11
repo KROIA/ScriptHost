@@ -8,6 +8,14 @@
 
 ## USER_SECTION_START 1
 
+## The engine needs no Gui and no Widgets: a console program can link it
+## alone. The widgets are a library of their own (widgets/, ScriptHostWidgets);
+## examples and unit tests keep the modules of the top-level CMakeLists.txt.
+set(QT_MODULES
+  Core
+  Qml
+)
+
 ## USER_SECTION_END
 
 set(INCLUDE_PATH "inc")

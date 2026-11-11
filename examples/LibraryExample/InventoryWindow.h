@@ -1,5 +1,5 @@
 #pragma once
-#include "ScriptHost.h"
+#include "ScriptHostWidgets.h"
 #include <QMainWindow>
 #include <QPointer>
 

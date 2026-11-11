@@ -40,6 +40,9 @@ list(APPEND ADDITIONAL_LIBRARIES )
 
 ## USER_SECTION_START 4
 
+## The widgets are a library of their own (ScriptHostWidgets).
+list(APPEND ADDITIONAL_LIBRARIES ${LIBRARY_NAME}Widgets_static)
+
 ## USER_SECTION_END
 
 ## Do not change the first 2 parameters             

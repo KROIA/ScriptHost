@@ -28,6 +28,18 @@
 
 /// USER_SECTION_START 2
 
+// The same for the widgets library (ScriptHostWidgets), which is built with
+// SCRIPTHOSTWIDGETS_LIB and links this one.
+#ifndef BUILD_STATIC
+	#if defined(SCRIPTHOSTWIDGETS_LIB)
+		#define SCRIPT_HOST_WIDGETS_API __declspec(dllexport)
+	#else
+		#define SCRIPT_HOST_WIDGETS_API __declspec(dllimport)
+	#endif
+#else
+	#define SCRIPT_HOST_WIDGETS_API
+#endif
+
 /// USER_SECTION_END
 
 #ifdef QT_ENABLED
@@ -72,5 +84,10 @@
 #endif
 
 /// USER_SECTION_START 5
+
+// The same warnings are errors in the widgets library.
+#if defined(SCRIPTHOSTWIDGETS_LIB)
+	#pragma warning (error : 4715 4700 4244 4100 4018 4996 4456 4065 4189 4172)
+#endif
 
 /// USER_SECTION_END

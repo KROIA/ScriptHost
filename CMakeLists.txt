@@ -273,6 +273,9 @@ endif()
 
 ## USER_SECTION_START 13
 
+## The widgets library (ScriptHostWidgets) on top of the engine in core/.
+add_subdirectory(widgets)
+
 ## USER_SECTION_END
 
 if(COMPILE_UNITTESTS AND NOT ScriptHost_NO_UNITTESTS)

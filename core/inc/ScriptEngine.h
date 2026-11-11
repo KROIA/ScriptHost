@@ -16,7 +16,6 @@
 #include <functional>
 
 class QIODevice;
-class QWidget;
 
 namespace ScriptHost
 {
@@ -175,11 +174,11 @@ public:
     };
     using ApprovalHandler = std::function<void(const ApprovalRequest& request,
                                                std::function<void(const ApprovalDecision&)> decide)>;
-    // Replaces the built-in dialog; nullptr brings it back. The handler may
-    // decide later, from its own window.
+    // Decides the requested runs that need approval; it may decide later,
+    // from its own window. Without one (the default, or nullptr) such a run
+    // fails with {"phase":"approval"}. ScriptHostWidgets has a dialog for it:
+    // useApprovalDialog().
     void setApprovalHandler(ApprovalHandler handler);
-    // Parent of the built-in dialog.
-    void setDialogParent(QWidget* parent);
 
     // ---- The user's choices, for the application to store ------------------
     // {"enabled": bool, "approval": {"<kind>": bool}, "methods": {"<name>": bool}}
@@ -262,7 +261,8 @@ public:
     // A run somebody else asks for. The script is checked first (a mistake
     // comes back as {"status":"error","phase":"syntax"|"check",...} and the
     // user is not bothered), approved by the user where its kind needs that
-    // ({"phase":"declined","reason":...} when not), then run. `done`
+    // ({"phase":"declined","reason":...} when not; {"phase":"approval"} when
+    // no approval handler is set), then run. `done`
     // always gets a result. `abandoned`, if given, is asked once the user has
     // decided: true means nobody is waiting for this run any more, and it is
     // dropped without a result. The run has the engine's Limits: a request
@@ -357,7 +357,6 @@ private:
     bool policy(const QHash<QString, bool>& byName, const QHash<QString, bool>& byGroup,
                 const ScriptMethod& method, bool fallback) const;
     const Entry* findEntry(const QString& name) const;
-    void askApproval(const ApprovalRequest& request, std::function<void(const ApprovalDecision&)> decide);
     // Why no further run can start now; empty when one can.
     QString unavailableReason(bool debug) const;
     Run* debugRun() const;
@@ -374,7 +373,6 @@ private:
     bool        m_approvalRequired[ScriptKindCount] = {};
     bool        m_approvalConfigurable[ScriptKindCount] = {true, true, true, true, true};
     ApprovalHandler   m_approvalHandler;
-    QPointer<QWidget> m_dialogParent;
     QSet<QByteArray>  m_approvedThisSession;    // hashes of approved code
     int         m_apiBudget = 6000;
     Limits      m_limits;

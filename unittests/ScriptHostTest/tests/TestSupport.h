@@ -4,7 +4,7 @@
 // to its end, and a small "database of objects" registered as methods - the
 // kind of interface scripts are for.
 
-#include "ScriptHost.h"
+#include "ScriptHostWidgets.h"
 #include <QEventLoop>
 #include <QFile>
 #include <QJsonArray>

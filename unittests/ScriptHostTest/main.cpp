@@ -1,6 +1,6 @@
 #include <iostream>
 #include <QApplication>
-#include "ScriptHost.h"
+#include "ScriptHostWidgets.h"
 #include "tests.h"
 
 #ifdef _MSC_VER

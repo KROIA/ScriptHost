@@ -32,6 +32,7 @@ public:
         ADD_TEST(TST_ScriptRequests::testApprovalForChangingScripts);
         ADD_TEST(TST_ScriptRequests::testApprovalPerKind);
         ADD_TEST(TST_ScriptRequests::testAbandonedRequest);
+        ADD_TEST(TST_ScriptRequests::testApprovalWithoutHandler);
         ADD_TEST(TST_ScriptRequests::testApprovalDialog);
     }
 
@@ -495,6 +496,30 @@ private:
         TEST_COMPARE(db.writes, 1);
     }
 
+    // Approval needed and nobody to ask: the run fails without running, and
+    // runs that need no approval are not affected.
+    TEST_FUNCTION(testApprovalWithoutHandler)
+    {
+        TEST_START;
+
+        Engine engine;
+        Db db;
+        TestSupport::registerDb(engine, db);
+        engine.setApproval(Engine::Approval::ChangingScripts);
+
+        QJsonObject result = TestSupport::request(engine,
+            TestSupport::codeRequest("db.setStatus('o1', 'archived');\nreturn 1;"));
+        TEST_COMPARE(result["status"].toString(), QString("error"));
+        TEST_COMPARE(result["phase"].toString(), QString("approval"));
+        TEST_ASSERT(result["message"].toString().contains("approval handler"));
+        TEST_COMPARE(db.writes, 0);
+        TEST_ASSERT(engine.runs().isEmpty());
+
+        result = TestSupport::request(engine, TestSupport::codeRequest("return db.list().length;"));
+        TEST_COMPARE(result["status"].toString(), QString("ok"));
+        TEST_COMPARE(result["result"].toInt(), 6);
+    }
+
     // The built-in dialog: shows the script and who asks, and Decline carries the reason.
     TEST_FUNCTION(testApprovalDialog)
     {
@@ -505,6 +530,7 @@ private:
         TestSupport::registerDb(engine, db);
         engine.setApproval(Engine::Approval::Always);
         engine.setRequesterName("the assistant");
+        ScriptHost::useApprovalDialog(&engine);
 
         const QString code = "db.setStatus('o1', 'archived');\nreturn 1;";
         QString shownCode, shownUses, headline;
