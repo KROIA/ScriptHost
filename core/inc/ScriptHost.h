@@ -16,6 +16,7 @@
 
 #include "ScriptMethod.h"
 #include "ScriptEngine.h"
+#include "ScriptExtension.h"
 #include "ScriptLibrary.h"
 
 /// USER_SECTION_END

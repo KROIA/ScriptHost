@@ -2,6 +2,7 @@
 // One run of a script: a worker thread with its own JavaScript engine.
 // Private to the library.
 
+#include "ScriptExtension.h"
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJSValue>
@@ -16,6 +17,7 @@
 #include <QStringList>
 #include <QThread>
 #include <QWaitCondition>
+#include <functional>
 
 class QJSEngine;
 
@@ -47,6 +49,8 @@ struct ScriptRunConfig
     bool readOnlyOnly = false;  // a method that changes something fails the script
     bool requested = false;     // started through requestRun(): on() only for requestedEvents
     QSet<QString> requestedEvents;
+    quint64 runId = 0;          // the engine's RunId, for the extensions
+    QList<QSharedPointer<ScriptExtension>> extensions;  // created at the start, in this order
 };
 
 // State both threads touch, under `mutex`.
@@ -73,6 +77,12 @@ struct ScriptRunShared
     QList<QPair<QString, QString>> events;
     int                           maxEvents = 0;  // queued at most, the oldest dropped; 0 = no limit
     qint64                        dropped = 0;    // events dropped so far
+    // Extensions (ScriptRunContext): callbacks for the worker thread by key
+    // ("" = not coalesced), the keys that keep the run alive, and whether
+    // the script code is over - nothing is scheduled then.
+    QList<QPair<QString, std::function<void()>>> scheduled;
+    QSet<QString>                 keepAlive;
+    bool                          ended = false;
 };
 
 class ScriptRunner : public QThread
@@ -102,6 +112,13 @@ public:
     // more (worker thread). False when the run may not receive it.
     bool listen(const QString& name, bool on);
 
+    // For ScriptRunContext; worker thread only.
+    void writeLog(const QString& text);
+    void throwError(const QString& message);
+    // Calls a script function; an exception it throws becomes the run's
+    // failure, returned once the current step of the run is done.
+    bool callScript(const QJSValue& fn, const QJSValueList& args);
+
 signals:
     // The script calls a method of the application; answer through the shared state.
     void callRequested(quint64 id, const QString& name, const QString& argsJson);
@@ -126,7 +143,9 @@ private:
     bool waitWhilePaused(int line, const QString& name, const QString& argsJson);
     QString variablesJson(int line);
     QJsonObject stoppedResult(const QString& reason) const;
-    void writeLog(const QString& text);
+    // Creates the extensions' per-run objects and installs them as globals.
+    // An error result when one of them cannot be installed, else empty.
+    QJsonObject installExtensions(QJSEngine& engine);
     // The one log line about dropped events, once there are any.
     void noteDroppedEvents();
 
@@ -147,6 +166,10 @@ private:
     bool                        m_droppedNoted = false;
     quint64                     m_nextId = 0;
     QString                     m_limitMessage;
+    // Extensions.
+    QList<QObject*>             m_extensionObjects; // the per-run objects, owned
+    QJSValue                    m_apply;            // prelude: calls a function for callScript()
+    QJsonObject                 m_failure;          // what callScript() met; ends the run
     // Statement stepping.
     bool                        m_instrumented = false;
     QJSValue                    m_formatVariables;  // prelude: a reader's values as JSON text
@@ -162,6 +185,17 @@ private:
     };
     QMap<qint64, Timer>         m_timers;
     qint64                      m_lastTimerId = 0;
+};
+
+// What a ScriptRunContext stands for: one extension in one run.
+struct ScriptRunContext::Data
+{
+    quint64                         runId = 0;
+    bool                            requested = false;
+    bool                            dryRun = false;
+    QString                         keyPrefix;  // "<extension name>\n": its keys apart from others'
+    QSharedPointer<ScriptRunShared> shared;
+    ScriptRunner*                   runner = nullptr;   // used on its own thread only, where it exists
 };
 
 // The object the script's method wrappers talk to.

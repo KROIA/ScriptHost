@@ -20,6 +20,7 @@ class QIODevice;
 namespace ScriptHost
 {
 
+class ScriptExtension;
 class ScriptLibrary;
 
 // Runs JavaScript inside an application, against an interface the
@@ -96,12 +97,33 @@ public:
     bool isMethodUserConfigurable(const QString& name) const;
     bool setMethodEnabledByUser(const QString& name, bool enabled);
 
+    // ---- Extensions: script objects beside the methods ----------------------
+    // See ScriptExtension. Adding a name again replaces the extension; a name
+    // that is not an identifier, or that a method is or starts with ("db" of
+    // "db.read"), is refused with a warning. New runs get the extension; runs
+    // already active keep what they started with. Each emits methodsChanged().
+    void addExtension(const QSharedPointer<ScriptExtension>& extension);
+    void removeExtension(const QString& name);
+    // The names of the extensions added, enabled or not, sorted.
+    QStringList extensions() const;
+    // Durable, by name, may be set before the extension is added. Disabled:
+    // absent from new runs and apiDefinition(); check() rejects a use of it.
+    // Default enabled.
+    void setExtensionEnabled(const QString& name, bool enabled);
+    bool isExtensionEnabled(const QString& name) const;
+    // A requested run (requestRun(), or RunOptions::external) gets no
+    // extension that is not allowed here, and check(code, true) rejects a use
+    // of it. Nothing is allowed by default.
+    void allowExtensionForRequestedRuns(const QString& name, bool allow = true);
+    bool isExtensionAllowedForRequestedRuns(const QString& name) const;
+
     // ---- The definition ---------------------------------------------------
     // The enabled methods as TypeScript declarations: for whoever writes
     // scripts - a person (the editor's reference shows it) or a program.
     // With a query (a method name, a namespace, keywords): the matching ones.
     // Without, and when everything does not fit setApiBudgetChars(): an index
-    // with one line per method.
+    // with one line per method. The enabled extensions' declarations follow
+    // the methods' (with a query: those whose name or declaration matches).
     QString apiDefinition(const QString& query = QString()) const;
     void setApiBudgetChars(int chars);              // default 6000; 0 = no limit
     int  apiBudgetChars() const { return m_apiBudget; }
@@ -203,9 +225,12 @@ public:
         // The error as a result object; {"status":"ok"} when ok.
         QJsonObject toJson() const;
     };
-    // Does the script compile, and does it only use methods there are?
-    // Nothing of the script is executed.
+    // Does the script compile, and does it only use methods there are, and
+    // members of the enabled extensions? Nothing of the script is executed.
+    // `requested`: as a requested run sees it - an extension it may not use
+    // is rejected. requestRun() checks so.
     Check check(const QString& code) const;
+    Check check(const QString& code, bool requested) const;
 
     struct RunOptions
     {
@@ -222,6 +247,7 @@ public:
                                         // statement
         bool        external = false;   // started through requestRun(): for the record, and
                                         // it gets only allowEventForRequestedRuns() events
+                                        // and allowExtensionForRequestedRuns() extensions
         bool        readOnlyOnly = false;    // a changing method fails the script
         int         timeoutMs = -1;     // -1 = Limits::timeoutMs, 0 = no limit; not
                                         // applied in the debugger
@@ -419,6 +445,9 @@ private:
     QPointer<ScriptLibrary> m_library;
     QPointer<QIODevice> m_output;
     QSet<QString>       m_requestedEvents;  // allowEventForRequestedRuns()
+    QList<QSharedPointer<ScriptExtension>> m_extensions;
+    QSet<QString>       m_disabledExtensions;   // setExtensionEnabled()
+    QSet<QString>       m_requestedExtensions;  // allowExtensionForRequestedRuns()
 
     QMap<RunId, Run*>   m_active;           // the runs in progress, owned
     RunId               m_lastRunId = 0;

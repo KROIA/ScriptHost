@@ -7,7 +7,9 @@
 #include <QJSValue>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QQmlEngine>
 #include <QRegularExpression>
+#include <exception>
 
 namespace ScriptHost
 {
@@ -26,6 +28,13 @@ const char* const kScriptFile = "script";
 // a `throw "text"` is otherwise indistinguishable from a returned string.
 const char* const kPrelude = R"JS((function(native){
     var handlers = {};      // event name -> [fn, ...]
+    var thrown = function(e){
+        var o = e !== null && typeof e === 'object';
+        return JSON.stringify({
+            e: o && e.message !== undefined ? String(e.message) : String(e),
+            n: o && e.name ? String(e.name) : '',
+            s: o && e.stack ? String(e.stack) : ''});
+    };
     return {
         make: function(name, trace){
             return function(){
@@ -92,11 +101,17 @@ const char* const kPrelude = R"JS((function(native){
                 var v = fn(JSON.parse(argsJson));
                 return JSON.stringify({v: v === undefined ? null : v, u: v === undefined});
             } catch (e) {
-                var o = e !== null && typeof e === 'object';
-                return JSON.stringify({
-                    e: o && e.message !== undefined ? String(e.message) : String(e),
-                    n: o && e.name ? String(e.name) : '',
-                    s: o && e.stack ? String(e.stack) : ''});
+                return thrown(e);
+            }
+        },
+        // An extension calls a script function (ScriptRunContext::call).
+        apply: function(fn, a){
+            try {
+                if (typeof fn !== 'function') throw new TypeError('not a function');
+                fn.apply(undefined, a);
+                return '{}';
+            } catch (e) {
+                return thrown(e);
             }
         }
     };
@@ -190,8 +205,22 @@ void ScriptRunner::run()
         if (stopRequested())
             engine.setInterrupted(true);
         result = execute(engine);
+        // The script code is over: nothing is scheduled any more, and what
+        // still waits goes here, before the per-run objects it may point to.
+        {
+            QList<QPair<QString, std::function<void()>>> dropped;
+            {
+                QMutexLocker lock(&m_shared->mutex);
+                m_shared->ended = true;
+                dropped.swap(m_shared->scheduled);
+            }
+        }
+        // Deleted while their engine still exists: they may hold QJSValues.
+        qDeleteAll(m_extensionObjects);
+        m_extensionObjects.clear();
         m_stepScope = QJSValue();       // these belong to the engine that ends here
         m_formatVariables = QJSValue();
+        m_apply = QJSValue();
         m_timers.clear();
         QMutexLocker lock(&m_engineMutex);
         m_engine = nullptr;
@@ -325,20 +354,28 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         }
         object.setProperty(method.name.mid(dot + 1), callable);
     }
+    m_apply = prelude.property(QStringLiteral("apply"));
+    const QJsonObject notInstalled = installExtensions(engine);
+    if (!notInstalled.isEmpty())
+        return notInstalled;
 
     QJsonObject payload;
     const QJsonObject failed = failure(runFunction.call({function, m_config.argsJson}), payload);
     if (!failed.isEmpty())
         return failed;
+    if (!m_failure.isEmpty())
+        return m_failure;
     QJsonObject result{{"status", "ok"}, {"result", payload.value(QStringLiteral("v"))}};
     if (payload.value(QStringLiteral("u")).toBool() && !m_config.dryRun)
         result["note"] = "the script returned nothing; use `return` to hand back a value";
 
-    // The timers and the event handlers keep the run alive. Waited for like
-    // sleep(), so that a stop wakes the wait at once, and so does an event.
-    // Events go in the order they were posted, ahead of due timers - but
-    // after kEventBatch events while a timer was due, the due timers run.
-    // 64: a timer waits for at most that many handlers, and a burst of
+    // The timers, the event handlers and the extensions (a key held with
+    // setKeepAlive(), a callback scheduled) keep the run alive. Waited for
+    // like sleep(), so that a stop wakes the wait at once, and so does an
+    // event, a scheduled callback or a released key. Scheduled callbacks go
+    // first, then events in the order they were posted, ahead of due timers -
+    // but after kEventBatch of them while a timer was due, the due timers
+    // run. 64: a timer waits for at most that many handlers, and a burst of
     // events still goes through without a timer between each.
     // ponytail: the next timer is found by a scan of all of them; a heap
     // when scripts keep thousands of timers.
@@ -354,18 +391,27 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         bool hasEvent = false;
         bool timerDue = false;
         QPair<QString, QString> event;
+        std::function<void()> job;
         {
             QMutexLocker lock(&m_shared->mutex);
-            if (m_timers.isEmpty() && m_shared->listening.isEmpty())
+            auto alive = [this]() {
+                return !m_timers.isEmpty() || !m_shared->listening.isEmpty()
+                       || !m_shared->keepAlive.isEmpty() || !m_shared->scheduled.isEmpty();
+            };
+            if (!alive())
                 break;
             const QDeadlineTimer deadline = m_timers.isEmpty()
                 ? QDeadlineTimer(QDeadlineTimer::Forever)
                 : QDeadlineTimer(qMax(qint64(0), next.value().due - m_clock.elapsed()));
-            while (!m_shared->stop && m_shared->events.isEmpty() && !deadline.hasExpired())
+            while (!m_shared->stop && m_shared->events.isEmpty() && m_shared->scheduled.isEmpty()
+                   && !deadline.hasExpired() && alive())
                 m_shared->wake.wait(&m_shared->mutex, deadline);
             timerDue = !m_timers.isEmpty() && deadline.hasExpired();
-            hasEvent = !m_shared->events.isEmpty() && (batch < kEventBatch || !timerDue);
-            if (hasEvent)
+            const bool queued = !m_shared->events.isEmpty() || !m_shared->scheduled.isEmpty();
+            hasEvent = queued && (batch < kEventBatch || !timerDue);
+            if (hasEvent && !m_shared->scheduled.isEmpty())
+                job = m_shared->scheduled.takeFirst().second;
+            else if (hasEvent)
                 event = m_shared->events.takeFirst();
         }
         // A timer that ran leaves the count: the other due timers follow it.
@@ -374,8 +420,20 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         noteDroppedEvents();
         if (stopRequested(&reason))
             return stoppedResult(reason);
+        if (!hasEvent && !timerDue)
+            continue;   // woken by a released key: is the run still alive?
         QJsonObject failedCall;
-        if (hasEvent) {
+        if (job) {
+            try {
+                job();
+            } catch (const std::exception& e) {
+                failedCall = {{"status", "error"}, {"phase", "runtime"},
+                              {"message", QStringLiteral("an extension failed: ") + QString::fromUtf8(e.what())}};
+            } catch (...) {
+                failedCall = {{"status", "error"}, {"phase", "runtime"},
+                              {"message", "an extension failed: unknown exception"}};
+            }
+        } else if (hasEvent) {
             failedCall = failure(runFunction.call({deliver.call({event.first}), event.second}), payload);
         } else {
             // Due again before it runs, so that the function may clear its own timer.
@@ -388,8 +446,76 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         }
         if (!failedCall.isEmpty())
             return failedCall;
+        if (!m_failure.isEmpty())
+            return m_failure;
     }
     return result;
+}
+
+QJsonObject ScriptRunner::installExtensions(QJSEngine& engine)
+{
+    QJSValue global = engine.globalObject();
+    for (const QSharedPointer<ScriptExtension>& extension : std::as_const(m_config.extensions)) {
+        const QString name = extension->name();
+        auto data = QSharedPointer<ScriptRunContext::Data>::create();
+        data->runId = m_config.runId;
+        data->requested = m_config.requested;
+        data->dryRun = m_config.dryRun;
+        data->keyPrefix = name + QLatin1Char('\n');
+        data->shared = m_shared;
+        data->runner = this;
+        QObject* object = extension->createRunObject(ScriptRunContext(data));
+        if (!object)
+            continue;
+        // Owned by the run, not by the JavaScript engine: deleted in run()
+        // at the end, while the engine still exists.
+        if (!object->parent()) {
+            QQmlEngine::setObjectOwnership(object, QQmlEngine::CppOwnership);
+            m_extensionObjects.append(object);
+        }
+        QJSValue value = engine.newQObject(object);
+        const QString glue = extension->glue();
+        if (!glue.isEmpty()) {
+            QJSValue make = engine.evaluate(glue, QStringLiteral("extension:") + name);
+            value = make.isCallable() ? make.call({value}) : make;
+            if (value.isError() || !make.isCallable()) {
+                return {{"status", "error"}, {"phase", "runtime"},
+                        {"message", QStringLiteral("the extension '%1' could not start: %2")
+                                        .arg(name, make.isCallable() ? value.toString()
+                                                                      : QStringLiteral("its glue is not a function"))}};
+            }
+        }
+        global.setProperty(name, value);
+    }
+    return QJsonObject();
+}
+
+void ScriptRunner::throwError(const QString& message)
+{
+    QMutexLocker lock(&m_engineMutex);
+    if (m_engine)
+        m_engine->throwError(message);
+}
+
+bool ScriptRunner::callScript(const QJSValue& fn, const QJSValueList& args)
+{
+    QJSEngine* engine = nullptr;
+    {
+        QMutexLocker lock(&m_engineMutex);
+        engine = m_engine;
+    }
+    if (!engine || !m_apply.isCallable())
+        return false;
+    QJSValue list = engine->newArray(uint(args.size()));
+    for (int i = 0; i < args.size(); ++i)
+        list.setProperty(quint32(i), args[i]);
+    QJsonObject payload;
+    const QJsonObject failed = failure(m_apply.call({fn, list}), payload);
+    if (failed.isEmpty())
+        return true;
+    if (m_failure.isEmpty())
+        m_failure = failed;
+    return false;
 }
 
 QJsonObject ScriptRunner::failure(const QJSValue& outcome, QJsonObject& payload) const

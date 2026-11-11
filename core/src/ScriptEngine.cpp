@@ -1,4 +1,5 @@
 #include "ScriptEngine.h"
+#include "ScriptExtension.h"
 #include "ScriptLibrary.h"
 #include "ScriptRunner.h"
 #include "ScriptSchema.h"
@@ -100,6 +101,7 @@ struct ScriptEngine::Run
     RunCallback                     callback;
     RunRecord                       record;
     bool                            debug = false;
+    QList<QSharedPointer<ScriptExtension>> extensions;  // runEnded() at the end
 };
 
 ScriptEngine::ScriptEngine(QObject* parent)
@@ -117,9 +119,12 @@ ScriptEngine::~ScriptEngine()
     // All stopped first, so that they end side by side.
     for (Run* active : std::as_const(m_active))
         active->runner->requestStop(QStringLiteral("cancelled"));
-    for (Run* active : std::as_const(m_active)) {
+    for (auto it = m_active.cbegin(); it != m_active.cend(); ++it) {
+        Run* active = it.value();
         active->runner->wait();
         delete active->runner;
+        for (const QSharedPointer<ScriptExtension>& extension : std::as_const(active->extensions))
+            extension->runEnded(it.key());
         delete active;
     }
 }
@@ -501,6 +506,86 @@ bool ScriptEngine::setMethodEnabledByUser(const QString& name, bool enabled)
     return true;
 }
 
+// ------------------------------------------------------------ extensions
+
+void ScriptEngine::addExtension(const QSharedPointer<ScriptExtension>& extension)
+{
+    if (!extension)
+        return;
+    const QString name = extension->name();
+    static const QRegularExpression identifier(QStringLiteral("^[A-Za-z_$][\\w$]*$"));
+    if (!identifier.match(name).hasMatch()) {
+        qWarning("ScriptHost::ScriptEngine: '%s' is not a valid extension name", qPrintable(name));
+        return;
+    }
+    for (const Entry& entry : std::as_const(m_registered)) {
+        if (entry.method.name() == name || entry.method.nameSpace() == name) {
+            qWarning("ScriptHost::ScriptEngine: the extension '%s' has the name of a method", qPrintable(name));
+            return;
+        }
+    }
+    for (int i = 0; i < m_extensions.size(); ++i) {
+        if (m_extensions[i]->name() == name) {
+            disconnect(m_extensions[i].data(), nullptr, this, nullptr);
+            m_extensions.removeAt(i);
+            break;
+        }
+    }
+    m_extensions.append(extension);
+    connect(extension.data(), &ScriptExtension::changed, this, &ScriptEngine::methodsChanged);
+    emit methodsChanged();
+}
+
+void ScriptEngine::removeExtension(const QString& name)
+{
+    for (int i = 0; i < m_extensions.size(); ++i) {
+        if (m_extensions[i]->name() == name) {
+            disconnect(m_extensions[i].data(), nullptr, this, nullptr);
+            m_extensions.removeAt(i);
+            emit methodsChanged();
+            return;
+        }
+    }
+}
+
+QStringList ScriptEngine::extensions() const
+{
+    QStringList names;
+    for (const QSharedPointer<ScriptExtension>& extension : m_extensions)
+        names << extension->name();
+    names.sort();
+    return names;
+}
+
+void ScriptEngine::setExtensionEnabled(const QString& name, bool enabled)
+{
+    if (enabled == !m_disabledExtensions.contains(name))
+        return;
+    if (enabled)
+        m_disabledExtensions.remove(name);
+    else
+        m_disabledExtensions.insert(name);
+    emit methodsChanged();
+}
+
+bool ScriptEngine::isExtensionEnabled(const QString& name) const
+{
+    return !m_disabledExtensions.contains(name);
+}
+
+void ScriptEngine::allowExtensionForRequestedRuns(const QString& name, bool allow)
+{
+    if (allow)
+        m_requestedExtensions.insert(name);
+    else
+        m_requestedExtensions.remove(name);
+}
+
+bool ScriptEngine::isExtensionAllowedForRequestedRuns(const QString& name) const
+{
+    return m_requestedExtensions.contains(name);
+}
+
 // ------------------------------------------------------------ definition
 
 QString ScriptEngine::apiDefinition(const QString& query) const
@@ -516,12 +601,25 @@ QString ScriptEngine::apiDefinition(const QString& query) const
     std::sort(list.begin(), list.end(), [](const ScriptMethod& a, const ScriptMethod& b) {
         return a.name() < b.name();
     });
+    // The enabled extensions: name -> declaration, queried now.
+    QMap<QString, QString> extensions;
+    for (const QSharedPointer<ScriptExtension>& extension : m_extensions) {
+        if (!isExtensionEnabled(extension->name()))
+            continue;
+        QString declaration = extension->declaration();
+        if (!declaration.isEmpty() && !declaration.endsWith(QLatin1Char('\n')))
+            declaration += QLatin1Char('\n');
+        extensions.insert(extension->name(), declaration);
+    }
 
-    auto index = [&list]() {
+    auto index = [&list, &extensions]() {
         QString text = QStringLiteral("// %1 methods. Ask for the declarations with a query: a method name, "
                                       "a namespace, keywords.\n").arg(list.size());
         for (const ScriptMethod& method : list)
             text += method.name() + QStringLiteral(" - ") + summaryOf(method.description()) + QLatin1Char('\n');
+        for (auto it = extensions.cbegin(); it != extensions.cend(); ++it)
+            text += it.key() + QStringLiteral(" - an object of the application; ask for '%1' for its members\n")
+                                   .arg(it.key());
         return text;
     };
     auto render = [](const QList<ScriptMethod>& methods) {
@@ -551,8 +649,24 @@ QString ScriptEngine::apiDefinition(const QString& query) const
     const QStringList words = query.toLower().split(QRegularExpression(QStringLiteral("[^a-z0-9_.$]+")),
                                                      Qt::SkipEmptyParts);
     if (words.isEmpty()) {
-        const QString all = render(list) + argsNote;
+        QString all = render(list);
+        for (const QString& declaration : std::as_const(extensions))
+            all += declaration;
+        all += argsNote;
         return m_apiBudget > 0 && all.size() > m_apiBudget ? index() : all;
+    }
+
+    // Extensions match by name or by a word of their declaration, and come whole.
+    QString extensionText;
+    for (auto it = extensions.cbegin(); it != extensions.cend(); ++it) {
+        const QString name = it.key().toLower();
+        const QString declaration = it.value().toLower();
+        for (const QString& word : words) {
+            if (word == name || word.startsWith(name + QLatin1Char('.')) || declaration.contains(word)) {
+                extensionText += it.value();
+                break;
+            }
+        }
     }
 
     struct Match { int score; ScriptMethod method; };
@@ -573,8 +687,10 @@ QString ScriptEngine::apiDefinition(const QString& query) const
         if (score > 0)
             matches.append(Match{score, method});
     }
-    if (matches.isEmpty())
-        return QStringLiteral("// Nothing matches '%1'.\n").arg(query) + index();
+    if (matches.isEmpty()) {
+        return extensionText.isEmpty() ? QStringLiteral("// Nothing matches '%1'.\n").arg(query) + index()
+                                       : extensionText;
+    }
 
     std::stable_sort(matches.begin(), matches.end(),
                      [](const Match& a, const Match& b) { return a.score > b.score; });
@@ -590,7 +706,7 @@ QString ScriptEngine::apiDefinition(const QString& query) const
     std::sort(chosen.begin(), chosen.end(), [](const ScriptMethod& a, const ScriptMethod& b) {
         return a.name() < b.name();
     });
-    QString text = render(chosen);
+    QString text = render(chosen) + extensionText;
     if (chosen.size() < matches.size())
         text += QStringLiteral("// %1 more match; narrow the query.\n").arg(matches.size() - chosen.size());
     return text;
@@ -610,7 +726,48 @@ QJsonObject ScriptEngine::Check::toJson() const
     return json;
 }
 
+namespace
+{
+
+// Is `path` ("draw.star", "width.toFixed") something of an extension with
+// these members? Empty when it is: a member, a property of one, or the way
+// to one ("draw" of "draw.star"). Else the first part that is not, with the
+// nearest name on its level in *closest.
+QString unknownMember(const QString& path, const QStringList& members, QString* closest)
+{
+    QString prefix;
+    for (const QString& part : path.split(QLatin1Char('.'))) {
+        const QString parent = prefix;
+        prefix = parent.isEmpty() ? part : parent + QLatin1Char('.') + part;
+        if (members.contains(prefix))
+            return QString();
+        const QString below = prefix + QLatin1Char('.');
+        if (std::any_of(members.cbegin(), members.cend(), [&below](const QString& m) { return m.startsWith(below); }))
+            continue;
+        QStringList level;
+        for (const QString& m : members) {
+            if (!parent.isEmpty() && !m.startsWith(parent + QLatin1Char('.')))
+                continue;
+            const QString rest = parent.isEmpty() ? m : m.mid(parent.size() + 1);
+            const QString name = (parent.isEmpty() ? QString() : parent + QLatin1Char('.'))
+                                 + rest.section(QLatin1Char('.'), 0, 0);
+            if (!level.contains(name))
+                level << name;
+        }
+        *closest = ScriptSchema::closestName(prefix, level);
+        return prefix;
+    }
+    return QString();
+}
+
+} // namespace
+
 ScriptEngine::Check ScriptEngine::check(const QString& code) const
+{
+    return check(code, false);
+}
+
+ScriptEngine::Check ScriptEngine::check(const QString& code, bool requested) const
 {
     Check result;
     // Syntax. Compiled on a thread of its own so that code written to run at
@@ -648,10 +805,42 @@ ScriptEngine::Check ScriptEngine::check(const QString& code) const
         else if (!nameSpaces.contains(nameSpace))
             nameSpaces << nameSpace;
     }
+    // The extensions, enabled or not: a use of a disabled one is reported.
+    QHash<QString, QSharedPointer<ScriptExtension>> extensions;
+    for (const QSharedPointer<ScriptExtension>& extension : m_extensions) {
+        extensions.insert(extension->name(), extension);
+        nameSpaces << extension->name();
+    }
+    QHash<QString, QStringList> members;    // queried once per check
 
     result.dynamic = ScriptSource::usesDynamicAccess(code);
     const QList<ScriptSource::Reference> references = ScriptSource::references(code, nameSpaces, globals);
     for (const ScriptSource::Reference& reference : references) {
+        const QSharedPointer<ScriptExtension> extension = extensions.value(reference.nameSpace);
+        if (extension) {
+            // Not a method: no call to the application, nothing to approve.
+            const QString name = extension->name();
+            QString message, closest;
+            if (!isExtensionEnabled(name)) {
+                message = QStringLiteral("'%1' is disabled").arg(name);
+            } else if (requested && !isExtensionAllowedForRequestedRuns(name)) {
+                message = QStringLiteral("the application does not let requested scripts use '%1'").arg(name);
+            } else if (!reference.path.isEmpty()) {
+                if (!members.contains(name))
+                    members.insert(name, extension->members());
+                const QString unknown = unknownMember(reference.path, members.value(name), &closest);
+                if (!unknown.isEmpty())
+                    message = QStringLiteral("'%1' has no member '%2'").arg(name, unknown);
+            }
+            if (message.isEmpty())
+                continue;
+            result.phase = QStringLiteral("check");
+            result.line = reference.line;
+            result.message = message;
+            if (!closest.isEmpty())
+                result.didYouMean = name + QLatin1Char('.') + closest;
+            return result;
+        }
         if (reference.function.isEmpty()) {
             result.dynamic = true;      // db[name], f(db): cannot tell what gets called
             continue;
@@ -874,6 +1063,16 @@ ScriptEngine::RunId ScriptEngine::run(const QString& code, const RunOptions& opt
     Run* active = new Run;
     active->debug = options.debug;
 
+    // The extensions as they are now; the run keeps them to its end.
+    config.runId = id;
+    for (const QSharedPointer<ScriptExtension>& extension : std::as_const(m_extensions)) {
+        const QString name = extension->name();
+        if (!isExtensionEnabled(name) || (options.external && !isExtensionAllowedForRequestedRuns(name)))
+            continue;
+        config.extensions.append(extension);
+        active->extensions.append(extension);
+    }
+
     // The methods as they are now; what changes during the run does not reach it.
     const QList<Entry>& all = m_registered;
     for (const Entry& entry : all) {
@@ -961,6 +1160,8 @@ void ScriptEngine::onRunCompleted(RunId id, const QJsonObject& result)
         return;
     active->runner->wait();
     active->runner->deleteLater();
+    for (const QSharedPointer<ScriptExtension>& extension : std::as_const(active->extensions))
+        extension->runEnded(id);
 
     active->record.result = result;
     m_runs.append(active->record);
@@ -1128,7 +1329,7 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
         return;
     }
 
-    const Check checked = check(code);
+    const Check checked = check(code, true);
     if (!checked.ok) {
         finish(checked.toJson());
         return;

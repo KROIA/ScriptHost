@@ -22,6 +22,7 @@ struct Reference
 {
     QString nameSpace;   // empty for a global function
     QString function;    // empty: the namespace is used some other way (db[x], f(db))
+    QString path;        // the whole chain of names after the namespace: "draw.star"
     int     line = 0;
 };
 

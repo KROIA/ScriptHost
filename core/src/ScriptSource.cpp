@@ -208,7 +208,9 @@ QList<Reference> references(const QString& code,
         declared.insert(declarations.next().captured(1));
 
     QList<Reference> found;
-    static const QRegularExpression member(QStringLiteral("\\G\\s*\\.\\s*([A-Za-z_$][\\w$]*)"));
+    static const QRegularExpression member(
+        QStringLiteral("\\G\\s*\\.\\s*([A-Za-z_$][\\w$]*)((?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)*)"));
+    static const QRegularExpression space(QStringLiteral("\\s+"));
 
     for (const QString& nameSpace : nameSpaces) {
         if (nameSpace.isEmpty() || declared.contains(nameSpace))
@@ -222,8 +224,11 @@ QList<Reference> references(const QString& code,
             reference.nameSpace = nameSpace;
             reference.line = lineAt(source, match.capturedStart());
             const QRegularExpressionMatch function = member.match(source, match.capturedEnd());
-            if (function.hasMatch())
+            if (function.hasMatch()) {
                 reference.function = function.captured(1);
+                reference.path = function.captured(1) + function.captured(2);
+                reference.path.remove(space);
+            }
             found.append(reference);
         }
     }

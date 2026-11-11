@@ -7,3 +7,4 @@
 #include "tests/TST_ScriptConcurrency.h"
 #include "tests/TST_ScriptEvents.h"
 #include "tests/TST_ScriptInput.h"
+#include "tests/TST_ScriptExtensions.h"
