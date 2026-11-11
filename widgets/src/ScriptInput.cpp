@@ -163,8 +163,7 @@ QObject* forwardInput(ScriptEngine* engine, QWidget* source)
     const QPointer<QWidget> area(source);
     engine->registerMethod(mouse, [engine, area](const QJsonObject&) -> QJsonValue {
         // Requested runs: the same opt-in as the "mouse" events.
-        if (engine->isExternalRun(engine->callingRun())
-            && !engine->isEventAllowedForRequestedRuns(QStringLiteral("mouse")))
+        if (!engine->isEventAllowedForRun(engine->callingRun(), QStringLiteral("mouse")))
             throw ScriptError(QStringLiteral("the application does not let requested scripts read the mouse"));
         if (!area)
             throw ScriptError(QStringLiteral("the input area is gone"));

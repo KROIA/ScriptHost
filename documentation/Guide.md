@@ -473,9 +473,9 @@ engine->allowEventForRequestedRuns("mouse");    // clicks, and input.mouse()
 
 `"mouse"` also gates `input.mouse()`: without it, the call throws `the application does not let requested scripts read the mouse`. A run keeps what was allowed when it started; `allowEventForRequestedRuns(name, false)` takes it back for later runs. `isEventAllowedForRequestedRuns(name)` asks.
 
-An allowed name also covers its family. An event name with colons, such as `"ui:7:clicked"`, reaches a requested run when the full name or its first part (`"ui"`) is allowed. So `allowEventForRequestedRuns("ui")` lets requested runs receive [widget signals](#signals-as-events). `isEventAllowedForRequestedRuns()` checks only the exact name it is given. **Changed in 2.3.0:** before, only the exact name counted. An application that allowed `"sensor"` and also posts events named like `"sensor:temperature"` now lets requested runs receive those too.
+An allowed name also covers its family. An event name with colons, such as `"ui:7:clicked"`, reaches a requested run when the full name or its first part (`"ui"`) is allowed. So `allowEventForRequestedRuns("ui")` lets requested runs receive [widget signals](#signals-as-events). `isEventAllowedForRequestedRuns()` answers by the same rule. **Changed in 2.3.0:** before, only the exact name counted. An application that allowed `"sensor"` and also posts events named like `"sensor:temperature"` now lets requested runs receive those too.
 
-Method handlers can apply the same rule: `callingRun()` is the run whose call is being handled (0 outside a handler; an asynchronous handler sees it only until it returns), and `isExternalRun(callingRun())` tells whether it is a requested one.
+Method handlers can apply the same rule: `callingRun()` is the run whose call is being handled (0 outside a handler; an asynchronous handler sees it only until it returns), and `isExternalRun(callingRun())` tells whether it is a requested one. `isEventAllowedForRun(callingRun(), name)` applies the opt-in as the run's `on()` does: true for a run that is not requested, and for a requested one by what was allowed when it started. `input.mouse()` and `ui.connect()` go by it.
 
 ### Events of your own, without widgets
 
@@ -973,7 +973,7 @@ setTimeout(() => ui.restore(), 5000);       // the timer keeps the run alive unt
 
 ### Dry runs
 
-In a [dry run](#dry-run) the reading tools run; the changing tools change nothing and answer with their example (a sample node, for most of them). A script that goes on to use what such a tool returned works with that example, not with a real widget.
+In a [dry run](#dry-run) the reading tools run; the changing tools change nothing and answer with their example (a sample node, for most of them). The ids in these examples are `-1`, which no widget has, so a reading tool given one fails with `no widget with the id -1` and never reaches a widget of the application by chance.
 
 ### Requested runs and the UI
 
@@ -1129,7 +1129,7 @@ engine->allowEventForRequestedRuns("ui");    // covers every "ui:..." event
 - `ui.destroy(widget)` deletes a widget at once, but only one this run created, or one below it: `only a widget this run created can be destroyed`. The application's own widgets can be hidden or closed, never deleted, so that it is not left with dangling pointers.
 - Deleting the `ScriptUi` deletes everything scripts created.
 
-In a dry run `ui.create()` makes nothing and answers with its example, `{id: 12, ids: {ok: 14}}`, and `ui.exec()` answers `{accepted: true, button: "OK"}`. A script that goes on to use the ids of its own widgets cannot be dry-run usefully.
+In a dry run `ui.create()` makes nothing and answers with its example, `{id: -1, ids: {ok: -1}}`, and `ui.exec()` answers `{accepted: true, button: "OK"}`. A script that goes on to read its own widgets fails there: `ui.property(d.id, 'text')` with `no widget with the id -1`, and `ui.property(d.ids.name, 'text')` with `'widget' is missing`, as the example has no `name`. A dry run of `look-up-item.js` ends that way, after `ui.create()` and `ui.exec()`, without touching the application.
 
 ### Examples
 
@@ -1364,7 +1364,7 @@ What the sections above did not need.
 | `setOutput(device)`, `output()` | Where log lines are written besides `runLog`. See [Output](#output) |
 | `setApprovalHandler(handler)` | Decides requested runs that need approval. See [Approval](#approval) |
 | `postEvent(name, data)`, `postEvent(id, name, data)` | An event for every run with a handler for `name`, or for the one run. See [Events](#events-keys-mouse-and-your-own) |
-| `allowEventForRequestedRuns(name, allow)`, `isEventAllowedForRequestedRuns(name)` | Which events requested runs get. See [Requested runs get no events](#requested-runs-get-no-events) |
+| `allowEventForRequestedRuns(name, allow)`, `isEventAllowedForRequestedRuns(name)`, `isEventAllowedForRun(id, name)` | Which events requested runs get, and whether one run gets an event. See [Requested runs get no events](#requested-runs-get-no-events) |
 | `callingRun()` | In a method's handler: the run that called it; 0 elsewhere |
 | `addExtension(extension)`, `removeExtension(name)`, `extensions()` | Objects of the application in every new run. See [Extensions](#extensions-objects-of-your-own) |
 | `setExtensionEnabled(name, bool)`, `allowExtensionForRequestedRuns(name, allow)` | Which runs get an extension |
@@ -1447,6 +1447,7 @@ Every `run*` signal names its run first.
 - [Reading and changing the UI](#reading-and-changing-the-ui) (ScriptHostWidgets): `exposeWidgets(engine, root)` gives scripts the `ui` methods. They read the widget tree, change widgets and layouts, and undo their changes with `ui.restore()`.
 - [Building dialogs from scripts](#building-dialogs-from-scripts): `ui.create()` and `ui.exec()`, and widget signals as events with `ui.connect()`.
 - [Switching functions off](#switching-functions-off): the members of an extension can be switched one by one (`setExtensionMemberEnabled`).
+- `isEventAllowedForRun(id, name)`: the event opt-in of one run, as it was when the run started, for method handlers that apply it. See [Requested runs get no events](#requested-runs-get-no-events).
 
 Two behaviours changed:
 

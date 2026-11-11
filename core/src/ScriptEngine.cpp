@@ -101,6 +101,7 @@ struct ScriptEngine::Run
     RunCallback                     callback;
     RunRecord                       record;
     bool                            debug = false;
+    QSet<QString>                   requestedEvents;    // allowed when it started
     QList<QSharedPointer<ScriptExtension>> extensions;  // runEnded() at the end
 };
 
@@ -1258,7 +1259,13 @@ void ScriptEngine::allowEventForRequestedRuns(const QString& name, bool allow)
 
 bool ScriptEngine::isEventAllowedForRequestedRuns(const QString& name) const
 {
-    return m_requestedEvents.contains(name);
+    return isEventAllowed(m_requestedEvents, name);
+}
+
+bool ScriptEngine::isEventAllowedForRun(RunId id, const QString& name) const
+{
+    const Run* active = m_active.value(id);
+    return active && (!active->record.external || isEventAllowed(active->requestedEvents, name));
 }
 
 ScriptEngine::Run* ScriptEngine::debugRun() const
@@ -1349,6 +1356,7 @@ ScriptEngine::RunId ScriptEngine::run(const QString& code, const RunOptions& opt
     const RunId id = ++m_lastRunId;
     Run* active = new Run;
     active->debug = options.debug;
+    active->requestedEvents = m_requestedEvents;
 
     // The extensions as they are now; the run keeps them to its end.
     config.runId = id;

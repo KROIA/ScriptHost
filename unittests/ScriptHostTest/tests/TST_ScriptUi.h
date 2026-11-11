@@ -1008,6 +1008,22 @@ private:
         TEST_ASSERT(!w.ok->isHidden() && x.free->parentWidget() == &w.window);
         TEST_COMPARE(w.status->text(), QString("Ready"));
 
+        // What a dry run answers names no widget, so the reading tools that
+        // really run cannot reach one of the application's by chance.
+        const QJsonObject made = run(engine,
+            "const d = ui.create({class: 'QDialog', name: 'ask'});"
+            "return [d.id, d.ids.ok, ui.move('free', 1, 1).id, ui.exec(d.id).accepted];", options);
+        TEST_COMPARE(made["result"].toArray(), (QJsonArray{-1, -1, -1, true}));
+        TEST_COMPARE(run(engine, "const d = ui.create({class: 'QLineEdit', name: 'name'});"
+                                 "return ui.property(d.id, 'text');", options)["message"].toString(),
+                     QString("ui.property: no widget with the id -1"));
+        const QJsonObject lookUp = run(engine, "const d = ui.create({class: 'QLineEdit', name: 'name'});"
+                                               "return ui.property(d.ids.name, 'text');", options);
+        // A name the example does not have: the call misses its argument.
+        TEST_ASSERT(lookUp["message"].toString().startsWith("ui.property: 'widget' is missing"));
+        // Ids start at 1: 0 is none, not a widget that has no id yet.
+        TEST_COMPARE(error(engine, "ui.info(0);"), QString("ui.info: no widget with the id 0"));
+
         // One tool switched off; the others work.
         engine.setMethodEnabled("ui.hide", false);
         const Engine::Check check = engine.check("ui.hide('okButton');");
@@ -1182,6 +1198,30 @@ private:
         TEST_ASSERT(TestSupport::spin([&]() { return live.done && dialog.isNull(); }));
         TEST_COMPARE(error(engine, "ui.exec('okButton');"), QString("ui.exec: the widget is not a QDialog"));
 
+        // Every ui.exec of a dialog leaves no connection to it behind (the
+        // first shows it, and Qt keeps one of its own from then on).
+        struct Counted : QDialog
+        {
+            using QDialog::QDialog;
+            int destroyedReceivers() const { return receivers(SIGNAL(destroyed(QObject*))); }
+        };
+        auto* counted = new Counted(&w.window);
+        counted->setObjectName("counted");
+        int receivers = 0;
+        for (int i = 0; i < 4; ++i) {
+            bool answered = false;
+            engine.run("return ui.exec('counted').accepted;", Engine::RunOptions(),
+                       [&](const QJsonObject&) { answered = true; });
+            TEST_ASSERT(TestSupport::spin([&]() { return counted->isVisible(); }));
+            counted->accept();
+            TEST_ASSERT(TestSupport::spin([&]() { return answered; }));
+            if (i == 0)
+                receivers = counted->destroyedReceivers();
+        }
+        TestSupport::spin([]() { return false; }, 50);
+        TEST_COMPARE(counted->destroyedReceivers(), receivers);
+        delete counted;
+
         // Closing; destroying only what the run made.
         const QJsonObject closed = value(engine,
             "const d = ui.create({class: 'QDialog', name: 'note', layout: {type: 'vbox', items: ["
@@ -1272,6 +1312,33 @@ private:
         const QJsonObject allowed = TestSupport::request(engine, TestSupport::codeRequest(code));
         TEST_COMPARE(allowed["result"].toString(),
                      QString("ui:%1:clicked").arg(w.ok->property("scripthost_id").toInt()));
+
+        // What a requested run started with counts, as for on(): the opt-in
+        // changed while it runs makes no difference to it.
+        engine.allowEventForRequestedRuns("go");
+        const auto connectLater = [&](bool allowedAtStart) {
+            engine.allowEventForRequestedRuns("ui", allowedAtStart);
+            Engine::RunOptions options;
+            options.external = true;
+            QStringList log;
+            bool finished = false;
+            Engine::RunId id = 0;
+            QObject context;
+            QObject::connect(&engine, &Engine::runLog, &context, [&](Engine::RunId run, const QString& text) {
+                if (run == id)
+                    log << text;
+            });
+            id = engine.run("on('go', () => { off('go');"
+                            "  try { log(ui.connect('okButton', 'clicked')); } catch (e) { log(e.message); } });"
+                            "log('ready');", options, [&](const QJsonObject&) { finished = true; });
+            TestSupport::spin([&]() { return log.contains("ready"); });
+            engine.allowEventForRequestedRuns("ui", !allowedAtStart);
+            engine.postEvent(id, "go", QJsonObject());
+            TestSupport::spin([&]() { return finished; });
+            return log.value(1);
+        };
+        TEST_COMPARE(connectLater(true), QString("ui:%1:clicked").arg(w.ok->property("scripthost_id").toInt()));
+        TEST_ASSERT(connectLater(false).contains("does not let requested scripts receive widget signals"));
     }
 
     TEST_FUNCTION(testCreatedWidgetsGoAndSwitches)

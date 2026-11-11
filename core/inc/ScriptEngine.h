@@ -355,6 +355,11 @@ public:
     // allowed by default. A run keeps what was allowed when it started.
     void allowEventForRequestedRuns(const QString& name, bool allow = true);
     bool isEventAllowedForRequestedRuns(const QString& name) const;
+    // May the active run `id` receive the event `name`? A run that is not
+    // requested gets every event; a requested one what was allowed when it
+    // started. False when no such run is active. For method handlers that
+    // apply the same opt-in: isEventAllowedForRun(callingRun(), "mouse").
+    bool isEventAllowedForRun(RunId id, const QString& name) const;
     // While a method's handler runs: the run that called it, else 0. An
     // asynchronous handler sees it only until it returns. With
     // isExternalRun(), a handler can treat requested runs apart.

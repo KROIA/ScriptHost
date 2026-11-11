@@ -35,6 +35,13 @@ struct ScriptMethodInfo
     QString exampleJson;        // what a dry run answers; empty = {"dry_run":true}
 };
 
+// Is the event `name` among those allowed for requested runs? A name allowed
+// covers its family too: "ui" the events "ui:...".
+inline bool isEventAllowed(const QSet<QString>& allowed, const QString& name)
+{
+    return allowed.contains(name) || allowed.contains(name.section(QLatin1Char(':'), 0, 0));
+}
+
 struct ScriptRunConfig
 {
     QString                 code;

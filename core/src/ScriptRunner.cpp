@@ -678,9 +678,7 @@ void ScriptRunner::noteDroppedEvents()
 
 bool ScriptRunner::listen(const QString& name, bool on)
 {
-    // An allowed name covers its family too: "ui" the events "ui:...".
-    if (on && m_config.requested && !m_config.requestedEvents.contains(name)
-        && !m_config.requestedEvents.contains(name.section(QLatin1Char(':'), 0, 0)))
+    if (on && m_config.requested && !isEventAllowed(m_config.requestedEvents, name))
         return false;
     QMutexLocker lock(&m_shared->mutex);
     if (on)

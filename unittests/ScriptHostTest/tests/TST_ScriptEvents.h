@@ -346,6 +346,14 @@ private:
             TestSupport::codeRequest("on('key', d => 1);\nreturn 1;"));
         TEST_COMPARE(again["phase"].toString(), QString("runtime"));
 
+        // A name allowed covers its family, as for on(): "ui" the "ui:..." events.
+        engine.allowEventForRequestedRuns("ui");
+        TEST_ASSERT(engine.isEventAllowedForRequestedRuns("ui:7:clicked"));
+        TEST_ASSERT(!engine.isEventAllowedForRequestedRuns("uix"));
+        TEST_ASSERT(!engine.isEventAllowedForRequestedRuns("x:ui"));
+        engine.allowEventForRequestedRuns("ui", false);
+        TEST_ASSERT(!engine.isEventAllowedForRequestedRuns("ui:7:clicked"));
+
         // The application's own runs need no opt-in.
         Outcome own;
         const Engine::RunId ownId = start(engine, "on('mouse', d => { log('m'); off('mouse'); });\nlog('ready');\nreturn 1;", own);

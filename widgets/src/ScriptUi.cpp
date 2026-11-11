@@ -71,7 +71,8 @@ QJsonObject widgetSchema()
 
 QJsonObject exampleNode()
 {
-    return QJsonObject{{"id", 7}, {"name", "okButton"}, {"class", "QPushButton"},
+    // An id no widget has: what a dry run answers must not name a real one.
+    return QJsonObject{{"id", -1}, {"name", "okButton"}, {"class", "QPushButton"},
                        {"rect", QJsonObject{{"x", 0}, {"y", 0}, {"width", 80}, {"height", 24}}},
                        {"visible", true}, {"enabled", true}, {"focus", false}, {"text", "OK"}};
 }
@@ -705,8 +706,9 @@ QWidget* ScriptUi::resolve(const QJsonValue& widget) const
     const QList<QWidget*> widgets = visibleWidgets();
     if (widget.isDouble()) {
         const int id = widget.toInt();
+        // Ids start at 1; a widget not seen yet has none (0).
         for (QWidget* w : widgets) {
-            if (w->property(kId).toInt() == id)
+            if (id > 0 && w->property(kId).toInt() == id)
                 return w;
         }
         throw ScriptError(QStringLiteral("no widget with the id %1").arg(id));
@@ -1602,7 +1604,7 @@ void ScriptUi::registerCreatingMethods()
                                          {"properties", QJsonObject{{"parent", widget},
                                                                     {"at", QJsonObject{{"type", "object"}}}}}},
                              false)
-            .setReturns(object, QString(), QJsonObject{{"id", 12}, {"ids", QJsonObject{{"ok", 14}}}}),
+            .setReturns(object, QString(), QJsonObject{{"id", -1}, {"ids", QJsonObject{{"ok", -1}}}}),
         [this](const QJsonObject& args) -> QJsonValue {
             return create(args.value("spec").toObject(), args.value("options").toObject());
         }, false);
@@ -1859,15 +1861,18 @@ void ScriptUi::exec(const QJsonObject& args, ScriptCompletion done)
     const auto clicked = std::make_shared<QPointer<QAbstractButton>>();
     for (QAbstractButton* button : dialog->findChildren<QAbstractButton*>())
         connect(button, &QAbstractButton::clicked, watch, [clicked, button]() { *clicked = button; });
-    connect(dialog, &QDialog::finished, watch, [watch, clicked, done](int result) {
+    // Deleted before it closed: not accepted. Disconnected once answered, so
+    // that every ui.exec of the dialog leaves no connection behind.
+    const auto gone = std::make_shared<QMetaObject::Connection>(
+        connect(dialog, &QObject::destroyed, this, [done]() { done.finish(QJsonObject{{"accepted", false}}); }));
+    connect(dialog, &QDialog::finished, watch, [watch, clicked, done, gone](int result) {
+        QObject::disconnect(*gone);
         QJsonObject answer{{"accepted", result == QDialog::Accepted}};
         if (*clicked)
             answer.insert("button", buttonName(*clicked));
         done.finish(answer);
         watch->deleteLater();
     }, Qt::QueuedConnection);
-    // Deleted before it closed: not accepted.
-    connect(dialog, &QObject::destroyed, this, [done]() { done.finish(QJsonObject{{"accepted", false}}); });
     dialog->open();
 }
 
@@ -1909,10 +1914,11 @@ int ScriptUi::signalOf(QWidget* widget, const QString& signal, QString* event) c
 QJsonValue ScriptUi::connectSignal(QWidget* widget, const QString& signal)
 {
     const ScriptEngine::RunId run = m_engine->callingRun();
-    if (m_engine->isExternalRun(run) && !m_engine->isEventAllowedForRequestedRuns(QStringLiteral("ui")))
-        throw ScriptError(QStringLiteral("the application does not let requested scripts receive widget signals"));
     QString event;
     const int index = signalOf(widget, signal, &event);
+    // The opt-in on() goes by: what was allowed when the run started.
+    if (!m_engine->isEventAllowedForRun(run, event))
+        throw ScriptError(QStringLiteral("the application does not let requested scripts receive widget signals"));
     QHash<QString, QPointer<QObject>>& connections = m_connections[run];
     if (connections.value(event))
         return event;
