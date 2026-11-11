@@ -1,9 +1,12 @@
 #pragma once
 #include "ScriptHost_base.h"
+#include "ScriptMethod.h"
+#include <QHash>
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QList>
 #include <QPointer>
+#include <functional>
 
 class QLayout;
 class QVariant;
@@ -14,7 +17,7 @@ namespace ScriptHost
 
 class ScriptEngine;
 
-// Lets scripts read a widget tree: the `ui.*` methods.
+// Lets scripts read and change a widget tree: the `ui.*` methods.
 //
 //   ScriptHost::exposeWidgets(engine, mainWindow);
 //
@@ -22,11 +25,17 @@ class ScriptEngine;
 //   const t = ui.tree();                       // the whole tree, one call
 //   const ok = ui.find({class: "QPushButton", text: "OK"})[0];
 //   log(ui.info(ok.id).sizeHint.width);
+//   ui.setProperty(ok.id, "text", "Apply");
+//   ui.restore();                              // back as it was
 //
-// The tools are ordinary methods (group "UI", all read-only): each can be
-// switched off with ScriptEngine::setMethodEnabled() ("ui.at") or all with
-// setMethodGroupEnabled("UI"), they appear in ScriptsWidget, run in dry
-// runs, and each call counts against the call limits.
+// The tools are ordinary methods in the group "UI": each can be switched off
+// with ScriptEngine::setMethodEnabled() ("ui.at") or all with
+// setMethodGroupEnabled("UI"), they appear in ScriptsWidget, and each call
+// counts against the call limits. The reading ones are read-only; the
+// changing ones are not, so a dry run records them without changing anything
+// and the approval rules for changing scripts apply.
+//
+// Reading:
 //   ui.root()                       the root widget's node
 //   ui.tree(widget?, depth?)        a node with `children`, nested down to
 //                                   `depth` levels (default: all); a node
@@ -54,6 +63,52 @@ class ScriptEngine;
 //   ui.tabOrder(widget?)            the nodes of the widget's window (default:
 //                                   the root's) that take the focus by Tab,
 //                                   in tab order
+//
+// Changing (each returns the widget's node unless said otherwise; with
+// managedByLayout: true when a layout places the widget - the layout may
+// move or resize it again at its next pass):
+//   ui.move(widget, x, y), ui.resize(widget, width, height),
+//   ui.setGeometry(widget, x, y, width, height)    in the parent's coordinates
+//   ui.show(widget), ui.hide(widget)               a window opens or closes
+//   ui.setEnabled(widget, enabled)
+//   ui.raise(widget), ui.lower(widget)             among its siblings
+//   ui.setFocus(widget)
+//   ui.setTabOrder([widget, widget, ...])          Tab goes from each to the
+//                                                  next, all in one window;
+//                                                  returns the new tab order
+//   ui.setCurrentIndex(widget, index)              QTabWidget, QStackedWidget,
+//                                                  QComboBox, QTabBar, QToolBox
+//   ui.setLayout(widget, {spacing?, margins?, alignment?, direction?})
+//                                   the widget's own layout; margins a number
+//                                   or {left?, top?, right?, bottom?},
+//                                   alignment "AlignLeft|AlignTop", direction
+//                                   "LeftToRight" ... "BottomToTop" (box
+//                                   layouts); returns the layout as in info()
+//   ui.setStretch(widget, stretch, at?)
+//                                   the widget's stretch in its box layout;
+//                                   with at {row} or {column}, that row's or
+//                                   column's stretch in the widget's own grid
+//                                   layout (returns the layout)
+//   ui.setSplitterSizes(widget, [sizes])   returns the sizes taken
+//   ui.moveToLayout(widget, target, at?)
+//                                   into the layout of `target`, reparented:
+//                                   at {index} in a box layout (default: the
+//                                   end), {row, column, rowSpan?, columnSpan?}
+//                                   in a grid, {index} as a new row of a form
+//   ui.reorder(widget, index)       within its box layout, with its stretch
+//   ui.setProperty(widget, name, value)
+//                                   a writable Q_PROPERTY, from JSON as below;
+//                                   strings for sizes "100x20", points
+//                                   "10, 20", rects "10, 20, 100, 30"; colours
+//                                   also as a name or {r, g, b, a?}; a font as
+//                                   the parts to change
+//   ui.restore()                    puts back everything this run changed
+//                                   with these tools, the latest first, and
+//                                   skips widgets that are gone; returns
+//                                   {restored, skipped}
+// Changes stay after the run ends unless it calls ui.restore(); what a run
+// changed is remembered only while it runs.
+//
 // A node: {id, name, class, rect: {x, y, width, height} in root
 // coordinates, visible, enabled, focus (the focus widget of its window),
 // text?}. `widget` is an id (a number) or an objectName (the first in tree
@@ -81,10 +136,10 @@ class ScriptEngine;
 // refuses every string property but "objectName".
 //
 // Requested runs (ScriptEngine::requestRun) may call the ui methods like any
-// other read-only method, under the approval rules set (setApproval):
-// reading the UI reveals how the application is built and what its widgets
-// show, so switch the group off (setMethodGroupEnabled("UI", false)) or
-// hide widgets if that matters.
+// other method, under the approval rules set (setApproval): reading the UI
+// reveals how the application is built and what its widgets show, and the
+// changing tools can rearrange it. Switch the group or single tools off, or
+// hide widgets, if that matters.
 //
 // One ScriptUi per engine: a second one exposed on the same engine takes the
 // ui methods over. It is a child of the root: delete it to stop - the ui
@@ -108,7 +163,9 @@ public:
     bool isTextReadable() const { return m_textReadable; }
 
 private:
+    void add(ScriptMethod method, ScriptMethodHandler handler, bool readOnly = true);
     void registerMethods();
+    void registerChangingMethods();
 
     // Resolving and describing widgets - what every ui tool builds on. The
     // ones that find a widget throw ScriptError when there is none.
@@ -135,10 +192,23 @@ private:
     QJsonValue readProperty(QWidget* widget, const QString& name) const;
     QJsonValue focused() const;
     QJsonValue tabOrder(QWidget* widget) const;
+    // The widgets of the widget's window that take the focus by Tab.
+    QList<QWidget*> tabChain(QWidget* widget) const;
+
+    // The changing tools. Each records how to undo it in the journal of the
+    // calling run; `undo` runs only while the widget lives.
+    void record(QWidget* widget, std::function<void(QWidget*)> undo);
+    QJsonValue restore();
+    // The node, with managedByLayout.
+    QJsonObject changed(QWidget* widget) const;
+    QJsonValue setLayout(QWidget* widget, QLayout* layout, const QJsonObject& options);
+    QJsonValue setStretch(QWidget* widget, int stretch, const QJsonObject& args);
+    QJsonValue moveToLayout(QWidget* widget, QWidget* target, const QJsonObject& at);
 
     QPointer<ScriptEngine> m_engine;
     QPointer<QWidget>      m_root;
     bool                   m_textReadable = true;
+    QHash<quint64, QList<std::function<bool()>>> m_journal;    // run -> its undo steps, oldest first
 };
 
 // Registers the ui methods for `root`'s widget tree. Returns the ScriptUi, a

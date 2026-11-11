@@ -3,9 +3,14 @@
 // exposeWidgets(): scripts read a widget tree through the ui methods - the
 // tree, ids, find/at/info/property, focus and tab order - and see nothing
 // outside the root, nothing hidden, no ScriptHost widget and no password.
+// They change it with the changing ui methods, and ui.restore() undoes what
+// a run changed.
 
 #include "UnitTest.h"
 #include "TestSupport.h"
+#include <QColorDialog>
+#include <QComboBox>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -13,6 +18,8 @@
 #include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QSplitter>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 class TST_ScriptUi : public UnitTest::Test
@@ -30,6 +37,13 @@ public:
         ADD_TEST(TST_ScriptUi::testHiddenAndOutsideWidgetsAreInvisible);
         ADD_TEST(TST_ScriptUi::testPasswordAndTextSwitch);
         ADD_TEST(TST_ScriptUi::testMethodsAreSwitchable);
+        ADD_TEST(TST_ScriptUi::testGeometryAndVisibility);
+        ADD_TEST(TST_ScriptUi::testFocusTabOrderAndCurrentIndex);
+        ADD_TEST(TST_ScriptUi::testLayoutProperties);
+        ADD_TEST(TST_ScriptUi::testMoveToLayoutAndReorder);
+        ADD_TEST(TST_ScriptUi::testSetProperty);
+        ADD_TEST(TST_ScriptUi::testRestore);
+        ADD_TEST(TST_ScriptUi::testDryRunAndSwitchedOffTools);
     }
 
 private:
@@ -94,9 +108,76 @@ private:
         }
     };
 
-    static QJsonObject run(Engine& engine, const QString& code)
+    // More widgets for the changing tools, children of the window outside its
+    // layout; made before Window::show(). "free" (10x10 at 20, 20), "grid"
+    // (a grid layout: two labels in row 0), "split" (a splitter with two
+    // widgets), "tabs" (three pages), "combo" (three items), "stack"
+    // (children "a" below "b"), "colors" (a colour dialog, closed).
+    struct Extras
     {
-        return TestSupport::runScript(engine, code);
+        QWidget*      free = nullptr;
+        QWidget*      grid = nullptr;
+        QGridLayout*  cells = nullptr;
+        QSplitter*    split = nullptr;
+        QTabWidget*   tabs = nullptr;
+        QComboBox*    combo = nullptr;
+        QWidget*      stack = nullptr;
+        QWidget*      a = nullptr;
+        QWidget*      b = nullptr;
+        QColorDialog* colors = nullptr;
+
+        explicit Extras(QWidget* window)
+        {
+            free = named(new QWidget(window), "free");
+            free->setGeometry(20, 20, 10, 10);
+            grid = named(new QWidget(window), "grid");
+            grid->setGeometry(0, 0, 200, 60);
+            cells = new QGridLayout(grid);
+            cells->addWidget(new QLabel("one"), 0, 0);
+            cells->addWidget(new QLabel("two"), 0, 1);
+            split = named(new QSplitter(window), "split");
+            split->addWidget(new QWidget);
+            split->addWidget(new QWidget);
+            split->setGeometry(0, 60, 300, 40);
+            tabs = named(new QTabWidget(window), "tabs");
+            for (const char* page : {"1", "2", "3"})
+                tabs->addTab(new QWidget, page);
+            tabs->setGeometry(0, 100, 200, 80);
+            combo = named(new QComboBox(window), "combo");
+            combo->addItems({"x", "y", "z"});
+            combo->setGeometry(0, 180, 100, 20);
+            stack = named(new QWidget(window), "stack");
+            stack->setGeometry(0, 200, 40, 40);
+            a = named(new QWidget(stack), "a");
+            b = named(new QWidget(stack), "b");
+            colors = new QColorDialog(window);
+            colors->setObjectName("colors");
+        }
+
+        template <class T>
+        static T* named(T* widget, const char* name)
+        {
+            widget->setObjectName(name);
+            return widget;
+        }
+    };
+
+    static QJsonObject run(Engine& engine, const QString& code, const TestSupport::Options& options = {})
+    {
+        return TestSupport::runScript(engine, code, options);
+    }
+
+    // "ok", or the error message.
+    static QString done(Engine& engine, const QString& code)
+    {
+        const QJsonObject result = run(engine, code);
+        return result["status"].toString() == "ok" ? QString("ok") : result["message"].toString();
+    }
+
+    // The message of a run that fails.
+    static QString error(Engine& engine, const QString& code)
+    {
+        return run(engine, code)["message"].toString();
     }
 
     static QJsonValue value(Engine& engine, const QString& code)
@@ -470,17 +551,21 @@ private:
         auto* w = new Window;
         QPointer<ScriptHost::ScriptUi> ui = ScriptHost::exposeWidgets(&engine, &w->window);
 
-        // Ten read-only methods in the group "UI".
-        QStringList methods;
+        // Ten read-only methods and eighteen changing ones, all in the group "UI".
+        QStringList reading, changing;
         for (const ScriptHost::ScriptMethod& m : engine.methods()) {
             if (!m.name().startsWith("ui."))
                 continue;
-            methods << m.name();
-            TEST_ASSERT(m.isReadOnly());
+            (m.isReadOnly() ? reading : changing) << m.name();
             TEST_COMPARE(m.group(), QString("UI"));
         }
-        TEST_COMPARE(methods, (QStringList{"ui.at", "ui.children", "ui.find", "ui.focused", "ui.info", "ui.parent",
+        TEST_COMPARE(reading, (QStringList{"ui.at", "ui.children", "ui.find", "ui.focused", "ui.info", "ui.parent",
                                            "ui.property", "ui.root", "ui.tabOrder", "ui.tree"}));
+        TEST_COMPARE(changing, (QStringList{"ui.hide", "ui.lower", "ui.move", "ui.moveToLayout", "ui.raise",
+                                            "ui.reorder", "ui.resize", "ui.restore", "ui.setCurrentIndex",
+                                            "ui.setEnabled", "ui.setFocus", "ui.setGeometry", "ui.setLayout",
+                                            "ui.setProperty", "ui.setSplitterSizes", "ui.setStretch",
+                                            "ui.setTabOrder", "ui.show"}));
         TEST_ASSERT(engine.apiDefinition("ui.tree").contains("tree(widget?: number | string, depth?: number)"));
         TEST_ASSERT(engine.apiDefinition().contains("ui.at - "));
 
@@ -507,6 +592,387 @@ private:
         delete w;
         TEST_ASSERT(ui.isNull());
         TEST_ASSERT(!engine.hasMethod("ui.tree"));
+    }
+
+    TEST_FUNCTION(testGeometryAndVisibility)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        Extras x(&w.window);
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+        const QString ok("ok");
+
+        // In the parent's coordinates; changes stay after the run.
+        const QJsonObject moved = value(engine, "return ui.move('free', 5, 6);").toObject();
+        TEST_COMPARE(x.free->pos(), QPoint(5, 6));
+        TEST_COMPARE(moved["name"].toString(), QString("free"));
+        TEST_COMPARE(moved["rect"].toObject()["x"].toInt(), 5);
+        TEST_ASSERT(moved.contains("managedByLayout") && !moved["managedByLayout"].toBool());
+        TEST_COMPARE(done(engine, "ui.resize('free', 30, 40);"), ok);
+        TEST_COMPARE(x.free->size(), QSize(30, 40));
+        TEST_COMPARE(done(engine, "ui.setGeometry('free', 1, 2, 3, 4);"), ok);
+        TEST_COMPARE(x.free->geometry(), QRect(1, 2, 3, 4));
+        // A widget a layout places says so: the layout may put it back.
+        TEST_ASSERT(value(engine, "return ui.move('okButton', 0, 0).managedByLayout;").toBool());
+        TEST_ASSERT(value(engine, "return ui.setGeometry('okButton', 0, 0, 5, 5).managedByLayout;").toBool());
+
+        TEST_COMPARE(done(engine, "ui.hide('okButton'); ui.setEnabled('buttons', false);"), ok);
+        TEST_ASSERT(w.ok->isHidden() && !w.cancel->isEnabled());
+        // A hidden widget is still there for scripts.
+        const QJsonObject shown = value(engine, "ui.setEnabled('buttons', true); return ui.show('okButton');")
+                                      .toObject();
+        TEST_ASSERT(!w.ok->isHidden() && w.cancel->isEnabled());
+        TEST_COMPARE(shown["visible"].toBool(), true);
+
+        TEST_COMPARE(done(engine, "ui.raise('a');"), ok);
+        TEST_COMPARE(x.stack->children(), (QObjectList{x.b, x.a}));
+        TEST_COMPARE(done(engine, "ui.lower('a');"), ok);
+        TEST_COMPARE(x.stack->children(), (QObjectList{x.a, x.b}));
+    }
+
+    TEST_FUNCTION(testFocusTabOrderAndCurrentIndex)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        Extras x(&w.window);
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+        const QString ok("ok");
+
+        TEST_COMPARE(done(engine, "ui.setFocus('passwordEdit');"), ok);
+        TestSupport::spin([&]() { return w.window.focusWidget() == w.password; }, 1000);
+        TEST_COMPARE(w.window.focusWidget(), static_cast<QWidget*>(w.password));
+        TEST_COMPARE(value(engine, "return ui.focused().name;").toString(), QString("passwordEdit"));
+
+        // Tab goes from each to the next; returns the new tab order.
+        const QJsonArray order = value(engine, "const cancel = ui.find({text: 'Cancel'})[0].id;"
+                                               "return ui.setTabOrder(['passwordEdit', 'okButton', cancel, 'nameEdit']);")
+                                     .toArray();
+        const QStringList tabbed = names(order);
+        const int from = tabbed.indexOf("passwordEdit");
+        TEST_ASSERT(from >= 0);
+        QStringList cycle;
+        for (int i = 0; i < 4; ++i)
+            cycle << tabbed.value((from + i) % tabbed.size());
+        TEST_COMPARE(cycle, (QStringList{"passwordEdit", "okButton", "", "nameEdit"}));
+        TEST_COMPARE(error(engine, "ui.setTabOrder(['okButton', 'okButton']);"),
+                     QString("ui.setTabOrder: a widget is in the list twice"));
+        TEST_COMPARE(error(engine, "ui.setTabOrder(['okButton', 'colors']);"),
+                     QString("ui.setTabOrder: the widgets are not in one window"));
+        TEST_COMPARE(error(engine, "ui.setTabOrder(['okButton']);"),
+                     QString("ui.setTabOrder: takes two widgets or more"));
+
+        TEST_COMPARE(done(engine, "ui.setCurrentIndex('tabs', 2); ui.setCurrentIndex('combo', 1);"), ok);
+        TEST_COMPARE(x.tabs->currentIndex(), 2);
+        TEST_COMPARE(x.combo->currentIndex(), 1);
+        TEST_COMPARE(value(engine, "return ui.setCurrentIndex('combo', 2).text;").toString(), QString("z"));
+        TEST_COMPARE(error(engine, "ui.setCurrentIndex('tabs', 3);"),
+                     QString("ui.setCurrentIndex: the index 3 is not between 0 and 2"));
+        TEST_COMPARE(error(engine, "ui.setCurrentIndex('okButton', 0);"),
+                     QString("ui.setCurrentIndex: a QPushButton has no current index"));
+
+        // All three undone.
+        const QJsonValue before = value(engine, "return ui.tabOrder().map(n => n.id);");
+        const QJsonObject back = value(engine, "ui.setFocus('okButton'); ui.setTabOrder(['nameEdit', 'okButton']);"
+                                               "ui.setCurrentIndex('tabs', 0); return ui.restore();")
+                                     .toObject();
+        TEST_COMPARE(back["restored"].toInt(), 3);
+        TestSupport::spin([&]() { return w.window.focusWidget() == w.password; }, 1000);
+        TEST_COMPARE(w.window.focusWidget(), static_cast<QWidget*>(w.password));
+        TEST_COMPARE(value(engine, "return ui.tabOrder().map(n => n.id);"), before);
+        TEST_COMPARE(x.tabs->currentIndex(), 2);
+    }
+
+    TEST_FUNCTION(testLayoutProperties)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        Extras x(&w.window);
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+        const QString ok("ok");
+        QLayout* outer = w.window.layout();
+        auto* row = static_cast<QBoxLayout*>(w.buttons->layout());
+
+        const QJsonObject layout = value(engine, "return ui.setLayout('window', "
+                                                 "{spacing: 12, margins: {left: 3}, alignment: 'AlignTop'});")
+                                       .toObject();
+        TEST_COMPARE(outer->spacing(), 12);
+        TEST_ASSERT(outer->contentsMargins() == QMargins(3, 10, 10, 10));
+        TEST_ASSERT(outer->alignment() == Qt::AlignTop);
+        TEST_COMPARE(layout["spacing"].toInt(), 12);
+        TEST_COMPARE(done(engine, "ui.setLayout('buttons', {margins: 0, direction: 'RightToLeft'});"), ok);
+        TEST_ASSERT(row->direction() == QBoxLayout::RightToLeft && row->contentsMargins() == QMargins());
+        TEST_COMPARE(error(engine, "ui.setLayout('okButton', {spacing: 1});"),
+                     QString("ui.setLayout: the widget has no layout"));
+        TEST_COMPARE(error(engine, "ui.setLayout('grid', {direction: 'LeftToRight'});"),
+                     QString("ui.setLayout: only a box layout has a direction"));
+        TEST_COMPARE(error(engine, "ui.setLayout('window', {alignment: 'AlignSideways'});"),
+                     QString("ui.setLayout: 'AlignSideways' is not an alignment"));
+
+        // A box item's stretch; a grid's row or column stretch.
+        TEST_ASSERT(value(engine, "return ui.setStretch('okButton', 3).managedByLayout;").toBool());
+        TEST_COMPARE(row->stretch(row->indexOf(w.ok)), 3);
+        TEST_COMPARE(done(engine, "ui.setStretch('grid', 4, {column: 1});"), ok);
+        TEST_COMPARE(x.cells->columnStretch(1), 4);
+        TEST_ASSERT(error(engine, "ui.setStretch('free', 1);").startsWith("ui.setStretch: the widget is not in a box layout"));
+        TEST_COMPARE(error(engine, "ui.setStretch('grid', 1, {row: 0, column: 0});"),
+                     QString("ui.setStretch: 'at' takes {row} or {column}"));
+
+        const QJsonArray taken = value(engine, "return ui.setSplitterSizes('split', [50, 150]);").toArray();
+        TEST_COMPARE(taken.size(), 2);
+        TEST_ASSERT(taken[0].toInt() < taken[1].toInt());
+        const QList<int> sizes = x.split->sizes();
+        TEST_COMPARE(sizes, (QList<int>{taken[0].toInt(), taken[1].toInt()}));
+        TEST_COMPARE(error(engine, "ui.setSplitterSizes('split', [1, 2, 3]);"),
+                     QString("ui.setSplitterSizes: the splitter has 2 widgets"));
+        TEST_COMPARE(error(engine, "ui.setSplitterSizes('free', [1]);"),
+                     QString("ui.setSplitterSizes: the widget is not a QSplitter"));
+
+        // All undone: back to what the runs before left.
+        const QJsonObject back = value(engine,
+            "ui.setLayout('window', {spacing: 0, margins: 1, alignment: 'AlignBottom'});"
+            "ui.setLayout('buttons', {direction: 'TopToBottom'}); ui.setStretch('okButton', 0);"
+            "ui.setStretch('grid', 0, {column: 1}); ui.setSplitterSizes('split', [150, 50]);"
+            "return ui.restore();").toObject();
+        TEST_COMPARE(back["restored"].toInt(), 5);
+        TEST_ASSERT(outer->spacing() == 12 && outer->contentsMargins() == QMargins(3, 10, 10, 10)
+                    && outer->alignment() == Qt::AlignTop);
+        TEST_ASSERT(row->direction() == QBoxLayout::RightToLeft);
+        TEST_COMPARE(row->stretch(row->indexOf(w.ok)), 3);
+        TEST_COMPARE(x.cells->columnStretch(1), 4);
+        TEST_COMPARE(x.split->sizes(), sizes);
+    }
+
+    TEST_FUNCTION(testMoveToLayoutAndReorder)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        Extras x(&w.window);
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+        const QString ok("ok");
+        auto* outer = static_cast<QBoxLayout*>(w.window.layout());
+        auto* row = static_cast<QBoxLayout*>(w.buttons->layout());
+
+        // Into a grid cell, reparented.
+        const QJsonObject moved = value(engine, "return ui.moveToLayout('nameEdit', 'grid', "
+                                                "{row: 1, column: 0, columnSpan: 2});").toObject();
+        TEST_COMPARE(w.name->parentWidget(), x.grid);
+        TEST_ASSERT(x.cells->itemAtPosition(1, 1) && x.cells->itemAtPosition(1, 1)->widget() == w.name);
+        TEST_COMPARE(outer->indexOf(w.name), -1);
+        TEST_ASSERT(moved["managedByLayout"].toBool());
+        // Into a box at an index, or at the end; a widget no layout placed too.
+        TEST_COMPARE(done(engine, "ui.moveToLayout('statusLabel', 'buttons', {index: 0});"
+                                  "ui.moveToLayout('free', 'buttons');"), ok);
+        TEST_COMPARE(row->indexOf(w.status), 0);
+        TEST_COMPARE(row->indexOf(x.free), row->count() - 1);
+        TEST_COMPARE(x.free->parentWidget(), w.buttons);
+        TEST_COMPARE(error(engine, "ui.moveToLayout('window', 'buttons');"),
+                     QString("ui.moveToLayout: the root or a window cannot move into a layout"));
+        TEST_COMPARE(error(engine, "ui.moveToLayout('okButton', 'passwordEdit');"),
+                     QString("ui.moveToLayout: the target has no box, grid or form layout"));
+        TEST_COMPARE(error(engine, "ui.moveToLayout('buttons', 'buttons');"),
+                     QString("ui.moveToLayout: a widget cannot move into itself"));
+        TEST_COMPARE(error(engine, "ui.moveToLayout('okButton', 'grid', {index: 0});"),
+                     QString("ui.moveToLayout: a grid layout takes {row, column, rowSpan?, columnSpan?}"));
+        TEST_COMPARE(error(engine, "ui.moveToLayout('okButton', 'window', {index: 9});"),
+                     QString("ui.moveToLayout: the index 9 is not between 0 and %1").arg(outer->count()));
+
+        // Reordered in its box layout: [Cancel, statusLabel, okButton, stretch, free]; the stretch goes along.
+        TEST_COMPARE(done(engine, "ui.reorder(ui.find({text: 'Cancel'})[0].id, 0);"), ok);
+        TEST_COMPARE(row->indexOf(w.cancel), 0);
+        TEST_COMPARE(row->stretch(0), 2);
+        TEST_COMPARE(row->indexOf(w.status), 1);
+        TEST_COMPARE(error(engine, "ui.reorder('okButton', 5);"),
+                     QString("ui.reorder: the index 5 is not between 0 and 4"));
+        TEST_COMPARE(error(engine, "ui.reorder('nameEdit', 0);"),
+                     QString("ui.reorder: the widget is not in a box layout"));
+
+        // All undone: each back in its layout and place, with its stretch and parent.
+        const QJsonObject back = value(engine,
+            "ui.moveToLayout('nameEdit', 'window', {index: 0}); ui.moveToLayout('free', 'grid', {row: 2, column: 0});"
+            "ui.reorder('okButton', 0); ui.moveToLayout(ui.find({text: 'Cancel'})[0].id, 'window');"
+            "return ui.restore();").toObject();
+        TEST_COMPARE(back["restored"].toInt(), 4);
+        TEST_COMPARE(w.name->parentWidget(), x.grid);
+        TEST_ASSERT(x.cells->itemAtPosition(1, 1) && x.cells->itemAtPosition(1, 1)->widget() == w.name);
+        TEST_COMPARE(outer->indexOf(w.name), -1);
+        TEST_COMPARE(x.free->parentWidget(), w.buttons);
+        TEST_COMPARE(x.cells->indexOf(x.free), -1);
+        TEST_COMPARE(w.cancel->parentWidget(), w.buttons);
+        TEST_COMPARE(row->indexOf(w.cancel), 0);
+        TEST_COMPARE(row->stretch(0), 2);
+        TEST_COMPARE(row->indexOf(w.status), 1);
+        TEST_COMPARE(row->indexOf(w.ok), 2);
+        TEST_COMPARE(row->indexOf(x.free), 4);
+    }
+
+    TEST_FUNCTION(testSetProperty)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        Extras x(&w.window);
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+        const QString ok("ok");
+        const auto set = [&engine](const QString& widget, const QString& name, const QString& json) {
+            return done(engine, QString("ui.setProperty('%1', '%2', %3);").arg(widget, name, json));
+        };
+
+        TEST_COMPARE(set("nameEdit", "placeholderText", "'Your name'"), ok);
+        TEST_COMPARE(w.name->placeholderText(), QString("Your name"));
+        TEST_COMPARE(set("nameEdit", "readOnly", "true"), ok);
+        TEST_ASSERT(w.name->isReadOnly());
+        TEST_COMPARE(set("nameEdit", "maxLength", "12"), ok);
+        TEST_COMPARE(w.name->maxLength(), 12);
+        TEST_COMPARE(set("nameEdit", "echoMode", "'Password'"), ok);
+        TEST_ASSERT(w.name->echoMode() == QLineEdit::Password);
+        TEST_COMPARE(set("passwordEdit", "echoMode", "0"), ok);
+        TEST_ASSERT(w.password->echoMode() == QLineEdit::Normal);
+        TEST_COMPARE(set("statusLabel", "alignment", "'AlignLeft|AlignTop'"), ok);
+        TEST_ASSERT(w.status->alignment() == (Qt::AlignLeft | Qt::AlignTop));
+        TEST_COMPARE(set("free", "minimumSize", "{width: 40, height: 25}"), ok);
+        TEST_COMPARE(x.free->minimumSize(), QSize(40, 25));
+        TEST_COMPARE(set("free", "maximumSize", "'50x30'"), ok);
+        TEST_COMPARE(x.free->maximumSize(), QSize(50, 30));
+        TEST_COMPARE(set("free", "pos", "{x: 7, y: 8}"), ok);
+        TEST_COMPARE(x.free->pos(), QPoint(7, 8));
+        TEST_COMPARE(set("free", "geometry", "'1, 2, 45, 28'"), ok);
+        TEST_COMPARE(x.free->geometry(), QRect(1, 2, 45, 28));
+        TEST_COMPARE(set("colors", "currentColor", "'#336699'"), ok);
+        TEST_COMPARE(x.colors->currentColor(), QColor("#336699"));
+        TEST_COMPARE(set("colors", "currentColor", "{r: 10, g: 20, b: 30}"), ok);
+        TEST_COMPARE(x.colors->currentColor(), QColor(10, 20, 30));
+        TEST_COMPARE(set("okButton", "font", "{bold: true, pointSize: 15}"), ok);
+        TEST_ASSERT(w.ok->font().bold() && w.ok->font().pointSize() == 15);
+        const QJsonObject node = value(engine, "return ui.setProperty('okButton', 'text', 'Apply');").toObject();
+        TEST_COMPARE(w.ok->text(), QString("Apply"));
+        TEST_COMPARE(node["text"].toString(), QString("Apply"));
+
+        TEST_COMPARE(set("nameEdit", "maxLength", "'long'"), QString("ui.setProperty: 'maxLength' takes a number"));
+        TEST_COMPARE(set("free", "minimumSize", "'big'"),
+                     QString("ui.setProperty: 'minimumSize' takes {width, height} or \"width x height\""));
+        TEST_COMPARE(set("colors", "currentColor", "'no colour'"),
+                     QString("ui.setProperty: 'currentColor' takes a colour: \"#rrggbb\", \"#aarrggbb\", a name or "
+                             "{r, g, b, a?}"));
+        TEST_COMPARE(set("nameEdit", "echoMode", "'Loud'"), QString("ui.setProperty: 'Loud' is not a value of EchoMode"));
+        TEST_COMPARE(set("nameEdit", "width", "5"), QString("ui.setProperty: 'width' of a QLineEdit cannot be set"));
+        TEST_COMPARE(set("nameEdit", "nope", "5"), QString("ui.setProperty: a QLineEdit has no property 'nope'"));
+        TEST_COMPARE(w.name->maxLength(), 12);
+        // Hidden from scripts: no such widget.
+        ScriptHost::ScriptUi::hideWidget(w.internals);
+        TEST_COMPARE(set("hiddenLabel", "text", "'x'"), QString("ui.setProperty: no widget 'hiddenLabel'"));
+        TEST_COMPARE(w.hidden->text(), QString("hidden label"));
+
+        // Undone, the latest first: the first value of a property comes back.
+        const QJsonObject back = value(engine,
+            "ui.setProperty('okButton', 'text', 'Go'); ui.setProperty('okButton', 'text', 'Stop');"
+            "ui.setProperty('statusLabel', 'alignment', 'AlignCenter'); ui.setProperty('colors', 'currentColor', 'red');"
+            "ui.setProperty('nameEdit', 'echoMode', 'Normal'); return ui.restore();").toObject();
+        TEST_COMPARE(back["restored"].toInt(), 5);
+        TEST_COMPARE(w.ok->text(), QString("Apply"));
+        TEST_ASSERT(w.status->alignment() == (Qt::AlignLeft | Qt::AlignTop));
+        TEST_COMPARE(x.colors->currentColor(), QColor(10, 20, 30));
+        TEST_ASSERT(w.name->echoMode() == QLineEdit::Password);
+    }
+
+    TEST_FUNCTION(testRestore)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        Extras x(&w.window);
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+        QPointer<QWidget> dropped = x.free;
+        engine.registerMethod(ScriptHost::ScriptMethod("test.drop"), [&dropped](const QJsonObject&) -> QJsonValue {
+            delete dropped;
+            return true;
+        });
+        auto* row = static_cast<QBoxLayout*>(w.buttons->layout());
+
+        // A mix, undone the latest first; the widget deleted meanwhile is skipped.
+        const QJsonObject result = value(engine,
+            "ui.move('free', 1, 1); ui.hide('okButton'); ui.setEnabled('nameEdit', false);"
+            "ui.setProperty('statusLabel', 'text', 'Busy'); ui.setCurrentIndex('tabs', 1); ui.raise('a');"
+            "ui.setLayout('window', {spacing: 20}); ui.reorder('okButton', 2);"
+            "test.drop(); return ui.restore();").toObject();
+        TEST_COMPARE(result["restored"].toInt(), 7);
+        TEST_COMPARE(result["skipped"].toInt(), 1);
+        TEST_ASSERT(dropped.isNull());
+        TEST_ASSERT(!w.ok->isHidden() && w.ok->isVisible() && w.name->isEnabled());
+        TEST_COMPARE(w.status->text(), QString("Ready"));
+        TEST_COMPARE(x.tabs->currentIndex(), 0);
+        TEST_COMPARE(x.stack->children(), (QObjectList{x.a, x.b}));
+        TEST_COMPARE(w.window.layout()->spacing(), 6);
+        TEST_COMPARE(row->indexOf(w.ok), 0);
+        TEST_COMPARE(row->stretch(row->indexOf(w.cancel)), 2);
+
+        // What a run does not restore stays; a later run cannot restore it.
+        TEST_COMPARE(done(engine, "ui.setProperty('statusLabel', 'text', 'Busy');"), QString("ok"));
+        const QJsonObject nothing = value(engine, "return ui.restore();").toObject();
+        TEST_COMPARE(nothing, (QJsonObject{{"restored", 0}, {"skipped", 0}}));
+        TEST_COMPARE(w.status->text(), QString("Busy"));
+        // Nor a failed one. Restored once, the journal is empty.
+        TEST_COMPARE(run(engine, "ui.setProperty('statusLabel', 'text', 'Failed'); throw new Error('no');")["status"]
+                         .toString(), QString("error"));
+        TEST_COMPARE(w.status->text(), QString("Failed"));
+        const QJsonObject twice = value(engine, "ui.setProperty('statusLabel', 'text', 'Idle'); ui.restore();"
+                                                "return ui.restore();").toObject();
+        TEST_COMPARE(twice["restored"].toInt(), 0);
+        TEST_COMPARE(w.status->text(), QString("Failed"));
+    }
+
+    TEST_FUNCTION(testDryRunAndSwitchedOffTools)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        Extras x(&w.window);
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+        const QPoint freeAt = x.free->pos();
+
+        // A dry run records the changing tools and changes nothing; reading works.
+        TestSupport::Options options;
+        options.dryRun = true;
+        const QJsonObject dry = run(engine,
+            "ui.move('free', 9, 9); ui.hide('okButton'); ui.setProperty('statusLabel', 'text', 'Busy');"
+            "ui.moveToLayout('free', 'buttons'); ui.restore(); return ui.root().name;", options);
+        TEST_COMPARE(dry["status"].toString(), QString("ok"));
+        TEST_ASSERT(dry["dry_run"].toBool());
+        TEST_COMPARE(dry["result"].toString(), QString("window"));
+        TEST_COMPARE(dry["would_call"].toObject().keys(),
+                     (QStringList{"ui.hide", "ui.move", "ui.moveToLayout", "ui.restore", "ui.setProperty"}));
+        TEST_COMPARE(x.free->pos(), freeAt);
+        TEST_ASSERT(!w.ok->isHidden() && x.free->parentWidget() == &w.window);
+        TEST_COMPARE(w.status->text(), QString("Ready"));
+
+        // One tool switched off; the others work.
+        engine.setMethodEnabled("ui.hide", false);
+        const Engine::Check check = engine.check("ui.hide('okButton');");
+        TEST_ASSERT(!check.ok && check.message.contains("disabled"));
+        TEST_COMPARE(run(engine, "ui.hide('okButton');")["status"].toString(), QString("error"));
+        TEST_ASSERT(!w.ok->isHidden());
+        TEST_COMPARE(done(engine, "ui.setEnabled('okButton', false);"), QString("ok"));
+        TEST_ASSERT(!w.ok->isEnabled());
+        engine.setMethodEnabled("ui.hide", true);
+        TEST_COMPARE(done(engine, "ui.hide('okButton');"), QString("ok"));
+        TEST_ASSERT(w.ok->isHidden());
     }
 };
 
