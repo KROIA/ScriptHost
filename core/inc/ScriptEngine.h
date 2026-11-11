@@ -349,8 +349,10 @@ public:
     void postEvent(const QString& name, const QJsonObject& data);
     void postEvent(RunId id, const QString& name, const QJsonObject& data);
     // A requested run (requestRun(), or RunOptions::external) gets no event
-    // whose name is not allowed here: its on() for that name throws. Nothing
-    // is allowed by default. A run keeps what was allowed when it started.
+    // whose name is not allowed here: its on() for that name throws. A name
+    // allowed also allows the names that begin with it and a colon: "ui"
+    // allows "ui:7:clicked" (the widget signals, ScriptUi). Nothing is
+    // allowed by default. A run keeps what was allowed when it started.
     void allowEventForRequestedRuns(const QString& name, bool allow = true);
     bool isEventAllowedForRequestedRuns(const QString& name) const;
     // While a method's handler runs: the run that called it, else 0. An

@@ -2,21 +2,42 @@
 #include "ScriptEngine.h"
 #include <QApplication>
 #include <QBoxLayout>
+#include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFont>
 #include <QFormLayout>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QKeySequence>
+#include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMetaEnum>
+#include <QMetaMethod>
 #include <QMetaProperty>
+#include <QPlainTextEdit>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QRadioButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QSizePolicy>
+#include <QSlider>
+#include <QSpinBox>
 #include <QSplitter>
+#include <QTabWidget>
+#include <QTextEdit>
+#include <QToolButton>
 #include <QUrl>
 #include <QWidget>
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <utility>
 
 namespace ScriptHost
 {
@@ -35,7 +56,8 @@ const char* const kMethods[] = {"ui.root", "ui.tree", "ui.children", "ui.parent"
                                 "ui.move", "ui.resize", "ui.setGeometry", "ui.show", "ui.hide", "ui.setEnabled",
                                 "ui.raise", "ui.lower", "ui.setFocus", "ui.setTabOrder", "ui.setCurrentIndex",
                                 "ui.setLayout", "ui.setStretch", "ui.setSplitterSizes", "ui.moveToLayout",
-                                "ui.reorder", "ui.setProperty", "ui.restore"};
+                                "ui.reorder", "ui.setProperty", "ui.restore",
+                                "ui.create", "ui.exec", "ui.close", "ui.destroy", "ui.connect", "ui.disconnect"};
 
 // The classes ui.setCurrentIndex() takes; each has the properties
 // "currentIndex" and "count".
@@ -272,6 +294,28 @@ void insertAt(QLayout* layout, QWidget* widget, const Place& place)
         form->insertRow(place.index, widget);
 }
 
+// The place `at` names in the layout: {index} in a box layout (-1 or none:
+// the end) or a form (a new row), {row, column, rowSpan?, columnSpan?} in a
+// grid. Throws when it is not there.
+Place placeIn(QLayout* layout, const QJsonObject& at)
+{
+    Place to;
+    to.index = at.value("index").toInt(-1);
+    if (qobject_cast<QGridLayout*>(layout)) {
+        if (!at.contains("row") || !at.contains("column"))
+            throw ScriptError(QStringLiteral("a grid layout takes {row, column, rowSpan?, columnSpan?}"));
+        to.row = at.value("row").toInt();
+        to.column = at.value("column").toInt();
+        to.rowSpan = at.value("rowSpan").toInt(1);
+        to.columnSpan = at.value("columnSpan").toInt(1);
+        if (to.row < 0 || to.column < 0 || to.rowSpan < 1 || to.columnSpan < 1)
+            throw ScriptError(QStringLiteral("the cell is not in the grid"));
+    } else if (qobject_cast<QBoxLayout*>(layout) && to.index > layout->count()) {
+        throw ScriptError(QStringLiteral("the index %1 is not between 0 and %2").arg(to.index).arg(layout->count()));
+    }
+    return to;
+}
+
 // Out of the layout it is in, if any; its parent stays.
 void takeOut(QWidget* widget)
 {
@@ -286,6 +330,60 @@ bool isHiddenByHand(const QWidget* widget)
 {
     return widget->isHidden() && (widget->isWindow() || widget->testAttribute(Qt::WA_WState_ExplicitShowHide));
 }
+
+// The dialog the widget is, or is in.
+QDialog* dialogOf(QWidget* widget)
+{
+    for (QWidget* w = widget; w; w = w->parentWidget()) {
+        if (auto* dialog = qobject_cast<QDialog*>(w))
+            return dialog;
+    }
+    return nullptr;
+}
+
+// How ui.exec() names a button: its objectName, else its text.
+QString buttonName(const QAbstractButton* button)
+{
+    return button->objectName().isEmpty() ? button->text().remove(QLatin1Char('&')) : button->objectName();
+}
+
+template <class T>
+ScriptUi::WidgetFactory make()
+{
+    return []() -> QWidget* { return new T; };
+}
+
+// Receives one signal, whatever its arguments, through the meta-object
+// system - as QSignalSpy does - and hands the arguments on.
+class SignalForwarder : public QObject
+{
+public:
+    SignalForwarder(QObject* parent, std::function<void(void**)> received)
+        : QObject(parent)
+        , m_received(std::move(received))
+    {
+    }
+
+    // `signal`: the method index in the sender's class.
+    bool listen(QObject* sender, int signal)
+    {
+        return bool(QMetaObject::connect(sender, signal, this, QObject::staticMetaObject.methodCount(),
+                                         Qt::DirectConnection));
+    }
+
+    int qt_metacall(QMetaObject::Call call, int id, void** argv) override
+    {
+        id = QObject::qt_metacall(call, id, argv);
+        if (id < 0 || call != QMetaObject::InvokeMetaMethod)
+            return id;
+        if (id == 0)
+            m_received(argv);
+        return id - 1;
+    }
+
+private:
+    std::function<void(void**)> m_received;
+};
 
 // The sibling right above the widget in the stacking order.
 QWidget* widgetAbove(const QWidget* widget)
@@ -462,6 +560,35 @@ QVariant fromJson(const QJsonValue& value, const QMetaProperty& property, const 
     }
 }
 
+// Sets the property from JSON; returns the value it had.
+QVariant writeProperty(QWidget* widget, const QString& name, const QJsonValue& value)
+{
+    const QMetaObject* meta = widget->metaObject();
+    const int index = meta->indexOfProperty(name.toLatin1().constData());
+    if (index < 0)
+        throw ScriptError(QStringLiteral("a %1 has no property '%2'").arg(className(widget), name));
+    const QMetaProperty property = meta->property(index);
+    if (!property.isWritable())
+        throw ScriptError(QStringLiteral("'%1' of a %2 cannot be set").arg(name, className(widget)));
+    const QVariant old = property.read(widget);
+    if (!property.write(widget, fromJson(value, property, old)))
+        throw ScriptError(QStringLiteral("'%1' cannot be set to that value").arg(name));
+    return old;
+}
+
+// All four margins from a number, or the sides given in {left?, top?,
+// right?, bottom?}; the others stay.
+QMargins marginsOf(const QJsonValue& value, const QMargins& current)
+{
+    if (value.isDouble()) {
+        const int all = value.toInt();
+        return QMargins(all, all, all, all);
+    }
+    const QJsonObject sides = value.toObject();
+    return QMargins(sides.value("left").toInt(current.left()), sides.value("top").toInt(current.top()),
+                    sides.value("right").toInt(current.right()), sides.value("bottom").toInt(current.bottom()));
+}
+
 } // namespace
 
 // ------------------------------------------------------------ ScriptUi
@@ -471,21 +598,57 @@ ScriptUi::ScriptUi(ScriptEngine* engine, QWidget* root)
     , m_engine(engine)
     , m_root(root)
 {
+    m_factories = {{QStringLiteral("QWidget"), make<QWidget>()},
+                   {QStringLiteral("QDialog"), make<QDialog>()},
+                   {QStringLiteral("QFrame"), make<QFrame>()},
+                   {QStringLiteral("QGroupBox"), make<QGroupBox>()},
+                   {QStringLiteral("QTabWidget"), make<QTabWidget>()},
+                   {QStringLiteral("QScrollArea"), make<QScrollArea>()},
+                   {QStringLiteral("QSplitter"), make<QSplitter>()},
+                   {QStringLiteral("QLabel"), make<QLabel>()},
+                   {QStringLiteral("QPushButton"), make<QPushButton>()},
+                   {QStringLiteral("QToolButton"), make<QToolButton>()},
+                   {QStringLiteral("QCheckBox"), make<QCheckBox>()},
+                   {QStringLiteral("QRadioButton"), make<QRadioButton>()},
+                   {QStringLiteral("QLineEdit"), make<QLineEdit>()},
+                   {QStringLiteral("QTextEdit"), make<QTextEdit>()},
+                   {QStringLiteral("QPlainTextEdit"), make<QPlainTextEdit>()},
+                   {QStringLiteral("QSpinBox"), make<QSpinBox>()},
+                   {QStringLiteral("QDoubleSpinBox"), make<QDoubleSpinBox>()},
+                   {QStringLiteral("QSlider"), make<QSlider>()},
+                   {QStringLiteral("QComboBox"), make<QComboBox>()},
+                   {QStringLiteral("QListWidget"), make<QListWidget>()},
+                   {QStringLiteral("QProgressBar"), make<QProgressBar>()},
+                   {QStringLiteral("QDialogButtonBox"), make<QDialogButtonBox>()}};
     if (!engine || !root) {
         qWarning("ScriptHost::ScriptUi: no engine or no root widget");
         return;
     }
     registerMethods();
     registerChangingMethods();
+    registerCreatingMethods();
     engine->setProperty(kOwner, qulonglong(quintptr(this)));
-    // The journal of a run goes with it; its changes stay.
+    // The journal of a run goes with it; its changes stay. What it created
+    // and connected goes too.
     connect(engine, &ScriptEngine::runFinished, this, [this](ScriptEngine::RunId id, const QJsonObject&) {
         m_journal.remove(id);
+        for (const QPointer<QObject>& forwarder : m_connections.take(id))
+            delete forwarder.data();
+        for (const QPointer<QWidget>& widget : m_created.take(id)) {
+            if (widget) {
+                widget->hide();
+                widget->deleteLater();
+            }
+        }
     });
 }
 
 ScriptUi::~ScriptUi()
 {
+    for (const QList<QPointer<QWidget>>& created : std::as_const(m_created)) {
+        for (const QPointer<QWidget>& widget : created)
+            delete widget.data();
+    }
     if (m_engine && m_engine->property(kOwner).toULongLong() == qulonglong(quintptr(this))) {
         for (const char* name : kMethods)
             m_engine->unregisterMethod(QString::fromLatin1(name));
@@ -762,6 +925,30 @@ void ScriptUi::add(ScriptMethod method, ScriptMethodHandler handler, bool readOn
 {
     method.setGroup(QStringLiteral("UI")).setReadOnly(readOnly);
     m_engine->registerMethod(method, std::move(handler));
+}
+
+void ScriptUi::addAsync(ScriptMethod method, AsyncScriptMethodHandler handler)
+{
+    method.setGroup(QStringLiteral("UI")).setReadOnly(false);
+    m_engine->registerAsyncMethod(method, std::move(handler));
+}
+
+void ScriptUi::addWidgetFactory(const QString& className, WidgetFactory factory)
+{
+    if (factory)
+        m_factories.insert(className, std::move(factory));
+}
+
+void ScriptUi::removeWidgetClass(const QString& className)
+{
+    m_factories.remove(className);
+}
+
+QStringList ScriptUi::widgetClasses() const
+{
+    QStringList classes = m_factories.keys();
+    classes.sort();
+    return classes;
 }
 
 void ScriptUi::registerMethods()
@@ -1240,16 +1427,7 @@ void ScriptUi::registerChangingMethods()
         [this](const QJsonObject& args) -> QJsonValue {
             QWidget* w = resolve(args.value("widget"));
             const QString name = args.value("name").toString();
-            const QMetaObject* meta = w->metaObject();
-            const int index = meta->indexOfProperty(name.toLatin1().constData());
-            if (index < 0)
-                throw ScriptError(QStringLiteral("a %1 has no property '%2'").arg(className(w), name));
-            const QMetaProperty metaProperty = meta->property(index);
-            if (!metaProperty.isWritable())
-                throw ScriptError(QStringLiteral("'%1' of a %2 cannot be set").arg(name, className(w)));
-            const QVariant old = metaProperty.read(w);
-            if (!metaProperty.write(w, fromJson(args.value("value"), metaProperty, old)))
-                throw ScriptError(QStringLiteral("'%1' cannot be set to that value").arg(name));
+            const QVariant old = writeProperty(w, name, args.value("value"));
             const QByteArray key = name.toLatin1();
             record(w, [key, old](QWidget* t) { t->setProperty(key.constData(), old); });
             return changed(w);
@@ -1269,16 +1447,7 @@ QJsonValue ScriptUi::setLayout(QWidget* widget, QLayout* layout, const QJsonObje
 {
     auto* box = qobject_cast<QBoxLayout*>(layout);
     // Everything checked before anything changes.
-    QMargins margins = layout->contentsMargins();
-    const QJsonValue newMargins = options.value("margins");
-    if (newMargins.isDouble()) {
-        const int all = newMargins.toInt();
-        margins = QMargins(all, all, all, all);
-    } else if (newMargins.isObject()) {
-        const QJsonObject sides = newMargins.toObject();
-        margins = QMargins(sides.value("left").toInt(margins.left()), sides.value("top").toInt(margins.top()),
-                           sides.value("right").toInt(margins.right()), sides.value("bottom").toInt(margins.bottom()));
-    }
+    const QMargins margins = marginsOf(options.value("margins"), layout->contentsMargins());
     Qt::Alignment alignment = layout->alignment();
     if (options.contains("alignment")) {
         bool ok = false;
@@ -1383,20 +1552,7 @@ QJsonValue ScriptUi::moveToLayout(QWidget* widget, QWidget* target, const QJsonO
     if (target == widget || widget->isAncestorOf(target))
         throw ScriptError(QStringLiteral("a widget cannot move into itself"));
 
-    Place to;
-    to.index = at.value("index").toInt(-1);
-    if (qobject_cast<QGridLayout*>(layout)) {
-        if (!at.contains("row") || !at.contains("column"))
-            throw ScriptError(QStringLiteral("a grid layout takes {row, column, rowSpan?, columnSpan?}"));
-        to.row = at.value("row").toInt();
-        to.column = at.value("column").toInt();
-        to.rowSpan = at.value("rowSpan").toInt(1);
-        to.columnSpan = at.value("columnSpan").toInt(1);
-        if (to.row < 0 || to.column < 0 || to.rowSpan < 1 || to.columnSpan < 1)
-            throw ScriptError(QStringLiteral("the cell is not in the grid"));
-    } else if (qobject_cast<QBoxLayout*>(layout) && to.index > layout->count()) {
-        throw ScriptError(QStringLiteral("the index %1 is not between 0 and %2").arg(to.index).arg(layout->count()));
-    }
+    const Place to = placeIn(layout, at);
 
     Place from;
     const bool wasInLayout = placeOf(widget, &from);
@@ -1417,6 +1573,403 @@ QJsonValue ScriptUi::moveToLayout(QWidget* widget, QWidget* target, const QJsonO
     takeOut(widget);
     insertAt(layout, widget, to);
     return changed(widget);
+}
+
+// ------------------------------------------------------------ creating, signals
+
+void ScriptUi::registerCreatingMethods()
+{
+    const QJsonObject widget = widgetSchema();
+    const QString object = QStringLiteral("object");
+
+    add(ScriptMethod(QStringLiteral("ui.create"))
+            .setDescription(QStringLiteral(
+                "Builds a widget, or a whole tree, in one call. spec: {class, name?, title?, <property>: value, "
+                "layout?: {type: \"vbox\"|\"hbox\"|\"grid\"|\"form\", spacing?, margins?, items: [spec]}, "
+                "children?: [spec] (pages of a QTabWidget, named by their title; a QSplitter's widgets; the one "
+                "of a QScrollArea), items?: [\"text\"] (QComboBox, QListWidget), role?: \"accept\"|\"reject\" "
+                "(a button that closes its dialog so)}. Properties as ui.setProperty takes them. A layout item "
+                "also gives its place: stretch (box), row, column, rowSpan, columnSpan (grid), label (form); "
+                "{stretch: n} alone is a stretch. A QDialogButtonBox accepts or rejects its dialog. Without a "
+                "parent the widget is a window of its own, closed until ui.show or ui.exec; with one it goes "
+                "into the parent's layout at `at` as in ui.moveToLayout. Returns {id, ids: {name: id}}. What a "
+                "run created goes when the run ends."))
+            .addRawParameter(QStringLiteral("spec"),
+                             QJsonObject{{"type", "object"}, {"description", "The widget: {class, ...}"}})
+            .addRawParameter(QStringLiteral("options"),
+                             QJsonObject{{"type", "object"},
+                                         {"description", "Where it goes: {parent?, at?}"},
+                                         {"properties", QJsonObject{{"parent", widget},
+                                                                    {"at", QJsonObject{{"type", "object"}}}}}},
+                             false)
+            .setReturns(object, QString(), QJsonObject{{"id", 12}, {"ids", QJsonObject{{"ok", 14}}}}),
+        [this](const QJsonObject& args) -> QJsonValue {
+            return create(args.value("spec").toObject(), args.value("options").toObject());
+        }, false);
+
+    QJsonObject dialog = widget;
+    dialog.insert("description", "A QDialog: its id or objectName");
+    addAsync(ScriptMethod(QStringLiteral("ui.exec"))
+                 .setDescription(QStringLiteral("Opens the dialog, modal for the user, and waits until it is "
+                                                "closed: the script waits, the application does not. Returns "
+                                                "{accepted, button?} - the objectName, else the text, of the button "
+                                                "clicked last."))
+                 .addRawParameter(QStringLiteral("dialog"), dialog)
+                 .setReturns(object, QString(), QJsonObject{{"accepted", true}, {"button", "OK"}}),
+             [this](const QJsonObject& args, ScriptCompletion done) { exec(args, done); });
+
+    QJsonObject example = exampleNode();
+    example.insert("managedByLayout", false);
+    add(ScriptMethod(QStringLiteral("ui.close"))
+            .setDescription(QStringLiteral("Closes the widget; a dialog is rejected. Not the root. Returns its "
+                                           "node, or null when closing deleted it."))
+            .addRawParameter(QStringLiteral("widget"), widget)
+            .setReturns(object, QString(), example),
+        [this](const QJsonObject& args) -> QJsonValue {
+            QWidget* w = resolve(args.value("widget"));
+            if (w == m_root)
+                throw ScriptError(QStringLiteral("the root cannot be closed"));
+            const bool wasHidden = isHiddenByHand(w);
+            record(w, [wasHidden](QWidget* t) { t->setVisible(!wasHidden); });
+            const QPointer<QWidget> alive(w);
+            w->close();
+            return alive ? QJsonValue(changed(w)) : QJsonValue();
+        }, false);
+
+    add(ScriptMethod(QStringLiteral("ui.destroy"))
+            .setDescription(QStringLiteral("Deletes a widget this run created with ui.create, or one below it."))
+            .addRawParameter(QStringLiteral("widget"), widget),
+        [this](const QJsonObject& args) -> QJsonValue {
+            QWidget* w = resolve(args.value("widget"));
+            if (!isCreated(w))
+                throw ScriptError(QStringLiteral("only a widget this run created can be destroyed"));
+            delete w;
+            return QJsonValue();
+        }, false);
+
+    add(ScriptMethod(QStringLiteral("ui.connect"))
+            .setDescription(QStringLiteral(
+                "Forwards a signal of the widget to this run as an event and returns the event's name: "
+                "on(ui.connect(ok, \"clicked\"), fn). signal: a name (\"clicked\": its overload with the most "
+                "arguments) or a signature (\"currentIndexChanged(int)\"). The event: {widget, signal, args: "
+                "[...]} plus each argument by its name (\"checked\", \"index\", \"text\", \"value\"). "
+                "Connections end with the run."))
+            .addRawParameter(QStringLiteral("widget"), widget)
+            .addParameter(QStringLiteral("signal"), QStringLiteral("string"),
+                          QStringLiteral("\"clicked\", \"textChanged\", \"valueChanged(int)\"..."))
+            .setReturns(QStringLiteral("string"), QString(), QJsonValue(QStringLiteral("ui:7:clicked"))),
+        [this](const QJsonObject& args) -> QJsonValue {
+            return connectSignal(resolve(args.value("widget")), args.value("signal").toString());
+        });
+
+    add(ScriptMethod(QStringLiteral("ui.disconnect"))
+            .setDescription(QStringLiteral("Stops forwarding the signal (see ui.connect). Returns whether it "
+                                           "was forwarded."))
+            .addRawParameter(QStringLiteral("widget"), widget)
+            .addParameter(QStringLiteral("signal"), QStringLiteral("string"), QStringLiteral("As for ui.connect"))
+            .setReturns(QStringLiteral("boolean"), QString(), true),
+        [this](const QJsonObject& args) -> QJsonValue {
+            QString event;
+            signalOf(resolve(args.value("widget")), args.value("signal").toString(), &event);
+            QObject* forwarder = m_connections[m_engine->callingRun()].take(event).data();
+            const bool was = forwarder != nullptr;
+            delete forwarder;
+            return was;
+        });
+}
+
+QJsonValue ScriptUi::create(const QJsonObject& spec, const QJsonObject& options)
+{
+    // Everything checked before the widget goes anywhere.
+    QWidget* parent = options.contains("parent") ? resolve(options.value("parent")) : nullptr;
+    QLayout* layout = parent ? parent->layout() : nullptr;
+    if (layout && !canInsert(layout))
+        throw ScriptError(QStringLiteral("the parent's layout takes no widgets"));
+    const Place place = layout ? placeIn(layout, options.value("at").toObject()) : Place();
+    Built built;
+    std::unique_ptr<QWidget> made(build(spec, &built));
+    for (const auto& role : built.roles) {
+        if (!dialogOf(role.first) && !(parent && dialogOf(parent)))
+            throw ScriptError(QStringLiteral("a button with a role must be in a dialog"));
+    }
+
+    QWidget* widget = made.release();
+    if (layout) {
+        insertAt(layout, widget, place);
+    } else if (parent) {
+        widget->setParent(parent, widget->windowFlags());
+        if (!widget->isWindow())
+            widget->show();
+    } else {
+        widget->setParent(m_root, widget->windowFlags() | Qt::Window);
+    }
+    for (const auto& role : built.roles) {
+        connect(role.first, &QAbstractButton::clicked, dialogOf(role.first),
+                role.second ? &QDialog::accept : &QDialog::reject);
+    }
+    for (QDialogButtonBox* box : built.boxes) {
+        if (QDialog* d = dialogOf(box)) {
+            connect(box, &QDialogButtonBox::accepted, d, &QDialog::accept);
+            connect(box, &QDialogButtonBox::rejected, d, &QDialog::reject);
+        }
+    }
+    m_created[m_engine->callingRun()].append(widget);
+    record(widget, [](QWidget* t) {
+        t->hide();
+        t->deleteLater();
+    });
+    return QJsonObject{{"id", widgetId(widget)}, {"ids", built.ids}};
+}
+
+QWidget* ScriptUi::build(const QJsonObject& spec, Built* built)
+{
+    const QString name = spec.value("class").toString();
+    const WidgetFactory factory = m_factories.value(name);
+    if (!factory) {
+        throw ScriptError(name.isEmpty() ? QStringLiteral("a spec has no class")
+                                         : QStringLiteral("the class '%1' is not allowed").arg(name));
+    }
+    std::unique_ptr<QWidget> widget(factory());
+    if (!widget)
+        throw ScriptError(QStringLiteral("the class '%1' could not be made").arg(name));
+    QWidget* w = widget.get();
+
+    if (spec.contains("items")) {
+        QStringList texts;
+        for (const QJsonValue& text : spec.value("items").toArray())
+            texts << text.toString();
+        if (auto* combo = qobject_cast<QComboBox*>(w))
+            combo->addItems(texts);
+        else if (auto* list = qobject_cast<QListWidget*>(w))
+            list->addItems(texts);
+        else
+            throw ScriptError(QStringLiteral("a %1 takes no items").arg(className(w)));
+    }
+    // The properties; a range before a value in it.
+    static const QStringList notProperties{"class", "name", "title", "layout", "children", "items", "role",
+                                           "stretch", "row", "column", "rowSpan", "columnSpan", "label"};
+    for (const QString& first : {QStringLiteral("minimum"), QStringLiteral("maximum")}) {
+        if (spec.contains(first))
+            writeProperty(w, first, spec.value(first));
+    }
+    for (auto it = spec.begin(); it != spec.end(); ++it) {
+        if (!notProperties.contains(it.key()) && it.key() != "minimum" && it.key() != "maximum")
+            writeProperty(w, it.key(), it.value());
+    }
+    if (spec.contains("title")) {
+        if (w->metaObject()->indexOfProperty("title") >= 0)
+            writeProperty(w, QStringLiteral("title"), spec.value("title"));
+        else
+            w->setWindowTitle(spec.value("title").toString());
+    }
+    if (spec.contains("name")) {
+        w->setObjectName(spec.value("name").toString());
+        built->ids.insert(w->objectName(), widgetId(w));
+    }
+
+    if (spec.contains("children")) {
+        auto* tabs = qobject_cast<QTabWidget*>(w);
+        auto* splitter = qobject_cast<QSplitter*>(w);
+        auto* scroll = qobject_cast<QScrollArea*>(w);
+        const QJsonArray children = spec.value("children").toArray();
+        if (!tabs && !splitter && !scroll)
+            throw ScriptError(QStringLiteral("a %1 takes no children - give it a layout").arg(className(w)));
+        if (scroll && children.size() != 1)
+            throw ScriptError(QStringLiteral("a QScrollArea takes one child"));
+        for (const QJsonValue& value : children) {
+            std::unique_ptr<QWidget> child(build(value.toObject(), built));
+            if (tabs) {
+                tabs->addTab(child.get(), child->windowTitle());
+            } else if (splitter) {
+                splitter->addWidget(child.get());
+            } else {
+                scroll->setWidget(child.get());
+                scroll->setWidgetResizable(true);
+            }
+            child.release();
+        }
+    }
+    if (spec.contains("layout"))
+        buildLayout(w, spec.value("layout").toObject(), built);
+    if (spec.contains("role")) {
+        auto* button = qobject_cast<QAbstractButton*>(w);
+        const QString role = spec.value("role").toString();
+        if (!button || (role != "accept" && role != "reject"))
+            throw ScriptError(QStringLiteral("'role' is \"accept\" or \"reject\", for a button"));
+        built->roles.append({button, role == "accept"});
+    }
+    if (auto* box = qobject_cast<QDialogButtonBox*>(w))
+        built->boxes.append(box);
+    return widget.release();
+}
+
+void ScriptUi::buildLayout(QWidget* owner, const QJsonObject& spec, Built* built)
+{
+    const QString type = spec.value("type").toString();
+    QLayout* layout = nullptr;
+    if (type == "vbox")
+        layout = new QVBoxLayout(owner);
+    else if (type == "hbox")
+        layout = new QHBoxLayout(owner);
+    else if (type == "grid")
+        layout = new QGridLayout(owner);
+    else if (type == "form")
+        layout = new QFormLayout(owner);
+    else
+        throw ScriptError(QStringLiteral("a layout's type is \"vbox\", \"hbox\", \"grid\" or \"form\", not '%1'")
+                              .arg(type));
+    if (spec.contains("spacing"))
+        layout->setSpacing(spec.value("spacing").toInt());
+    layout->setContentsMargins(marginsOf(spec.value("margins"), layout->contentsMargins()));
+
+    auto* box = qobject_cast<QBoxLayout*>(layout);
+    auto* grid = qobject_cast<QGridLayout*>(layout);
+    auto* form = qobject_cast<QFormLayout*>(layout);
+    const QJsonArray items = spec.value("items").toArray();
+    for (int i = 0; i < items.size(); ++i) {
+        const QJsonObject item = items.at(i).toObject();
+        if (box && !item.contains("class") && item.contains("stretch")) {
+            box->addStretch(item.value("stretch").toInt());
+            continue;
+        }
+        std::unique_ptr<QWidget> child(build(item, built));
+        if (box) {
+            box->addWidget(child.get(), item.value("stretch").toInt());
+        } else if (grid) {
+            grid->addWidget(child.get(), qMax(0, item.value("row").toInt(i)), qMax(0, item.value("column").toInt()),
+                            qMax(1, item.value("rowSpan").toInt(1)), qMax(1, item.value("columnSpan").toInt(1)));
+        } else if (item.contains("label")) {
+            form->addRow(item.value("label").toString(), child.get());
+        } else {
+            form->addRow(child.get());
+        }
+        child.release();
+    }
+}
+
+void ScriptUi::exec(const QJsonObject& args, ScriptCompletion done)
+{
+    auto* dialog = qobject_cast<QDialog*>(resolve(args.value("dialog")));
+    if (!dialog)
+        throw ScriptError(QStringLiteral("the widget is not a QDialog"));
+    // The button clicked last names the answer. A button box closes the
+    // dialog before the button's other receivers hear of the click: the
+    // answer is given once those are done.
+    auto* watch = new QObject(dialog);
+    const auto clicked = std::make_shared<QPointer<QAbstractButton>>();
+    for (QAbstractButton* button : dialog->findChildren<QAbstractButton*>())
+        connect(button, &QAbstractButton::clicked, watch, [clicked, button]() { *clicked = button; });
+    connect(dialog, &QDialog::finished, watch, [watch, clicked, done](int result) {
+        QJsonObject answer{{"accepted", result == QDialog::Accepted}};
+        if (*clicked)
+            answer.insert("button", buttonName(*clicked));
+        done.finish(answer);
+        watch->deleteLater();
+    }, Qt::QueuedConnection);
+    // Deleted before it closed: not accepted.
+    connect(dialog, &QObject::destroyed, this, [done]() { done.finish(QJsonObject{{"accepted", false}}); });
+    dialog->open();
+}
+
+bool ScriptUi::isCreated(const QWidget* widget) const
+{
+    const QList<QPointer<QWidget>> created = m_created.value(m_engine->callingRun());
+    for (const QWidget* w = widget; w; w = w->parentWidget()) {
+        if (std::any_of(created.begin(), created.end(), [w](const QPointer<QWidget>& c) { return c.data() == w; }))
+            return true;
+    }
+    return false;
+}
+
+int ScriptUi::signalOf(QWidget* widget, const QString& signal, QString* event) const
+{
+    const QMetaObject* meta = widget->metaObject();
+    const bool signature = signal.contains(QLatin1Char('('));
+    int index = -1;
+    if (signature) {
+        index = meta->indexOfSignal(QMetaObject::normalizedSignature(signal.toLatin1().constData()).constData());
+    } else {
+        const QByteArray name = signal.toLatin1();
+        for (int i = 0; i < meta->methodCount(); ++i) {
+            const QMetaMethod method = meta->method(i);
+            if (method.methodType() == QMetaMethod::Signal && method.name() == name
+                && (index < 0 || method.parameterCount() > meta->method(index).parameterCount()))
+                index = i;
+        }
+    }
+    if (index < 0)
+        throw ScriptError(QStringLiteral("a %1 has no signal '%2'").arg(className(widget), signal));
+    const QMetaMethod method = meta->method(index);
+    *event = QStringLiteral("ui:%1:%2")
+                 .arg(widgetId(widget))
+                 .arg(QString::fromLatin1(signature ? method.methodSignature() : method.name()));
+    return index;
+}
+
+QJsonValue ScriptUi::connectSignal(QWidget* widget, const QString& signal)
+{
+    const ScriptEngine::RunId run = m_engine->callingRun();
+    if (m_engine->isExternalRun(run) && !m_engine->isEventAllowedForRequestedRuns(QStringLiteral("ui")))
+        throw ScriptError(QStringLiteral("the application does not let requested scripts receive widget signals"));
+    QString event;
+    const int index = signalOf(widget, signal, &event);
+    QHash<QString, QPointer<QObject>>& connections = m_connections[run];
+    if (connections.value(event))
+        return event;
+    const QPointer<QWidget> sender(widget);
+    const QPointer<ScriptEngine> engine(m_engine);
+    auto* forwarder = new SignalForwarder(this, [this, sender, engine, run, event, index](void** argv) {
+        if (engine && sender)
+            engine->postEvent(run, event, signalData(sender, index, argv));
+    });
+    if (!forwarder->listen(widget, index)) {
+        delete forwarder;
+        throw ScriptError(QStringLiteral("the signal '%1' cannot be connected").arg(signal));
+    }
+    connections.insert(event, forwarder);
+    return event;
+}
+
+QJsonObject ScriptUi::signalData(QWidget* widget, int index, void** argv) const
+{
+    const QMetaMethod method = widget->metaObject()->method(index);
+    const QList<QByteArray> names = method.parameterNames();
+    const bool hideText = !m_textReadable || isPassword(widget);
+    QJsonObject data{{"widget", widgetId(widget)}, {"signal", QString::fromLatin1(method.name())}};
+    QJsonArray args;
+    for (int i = 0; i < method.parameterCount(); ++i) {
+        void* arg = argv[i + 1];
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        const QMetaType metaType = method.parameterMetaType(i);
+        const int type = metaType.id();
+        const bool isObject = metaType.flags().testFlag(QMetaType::PointerToQObject);
+        const QVariant value = metaType.isValid() ? QVariant(metaType, arg) : QVariant();
+#else
+        const int type = method.parameterType(i);
+        const bool isObject = QMetaType::typeFlags(type).testFlag(QMetaType::PointerToQObject);
+        const QVariant value = type != QMetaType::UnknownType ? QVariant(type, arg) : QVariant();
+#endif
+        QJsonValue json;
+        if (isObject) {
+            auto* w = qobject_cast<QWidget*>(*static_cast<QObject**>(arg));
+            if (w && isVisible(w))
+                json = widgetId(w);
+        } else if (!(hideText && type == QMetaType::QString)) {
+            json = toJson(value);
+        }
+        args.append(json);
+        QString name = QString::fromLatin1(names.value(i));
+        if (name.isEmpty()) {
+            name = type == QMetaType::Bool      ? QStringLiteral("checked")
+                   : type == QMetaType::QString ? QStringLiteral("text")
+                   : type == QMetaType::Int || type == QMetaType::Double ? QStringLiteral("value")
+                                                                         : QStringLiteral("arg%1").arg(i);
+        }
+        if (!data.contains(name))
+            data.insert(name, json);
+    }
+    data.insert("args", args);
+    return data;
 }
 
 ScriptUi* exposeWidgets(ScriptEngine* engine, QWidget* root)

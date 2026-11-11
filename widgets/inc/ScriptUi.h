@@ -5,9 +5,13 @@
 #include <QJsonObject>
 #include <QJsonValue>
 #include <QList>
+#include <QPair>
 #include <QPointer>
+#include <QStringList>
 #include <functional>
 
+class QAbstractButton;
+class QDialogButtonBox;
 class QLayout;
 class QVariant;
 class QWidget;
@@ -17,7 +21,8 @@ namespace ScriptHost
 
 class ScriptEngine;
 
-// Lets scripts read and change a widget tree: the `ui.*` methods.
+// Lets scripts read and change a widget tree, and build GUI of their own:
+// the `ui.*` methods.
 //
 //   ScriptHost::exposeWidgets(engine, mainWindow);
 //
@@ -27,6 +32,12 @@ class ScriptEngine;
 //   log(ui.info(ok.id).sizeHint.width);
 //   ui.setProperty(ok.id, "text", "Apply");
 //   ui.restore();                              // back as it was
+//
+//   const d = ui.create({class: "QDialog", title: "Name?", layout: {type: "vbox", items: [
+//       {class: "QLineEdit", name: "answer"},
+//       {class: "QDialogButtonBox", standardButtons: "Ok|Cancel"}]}});
+//   if (ui.exec(d.id).accepted)
+//       log(ui.property(d.ids.answer, "text"));
 //
 // The tools are ordinary methods in the group "UI": each can be switched off
 // with ScriptEngine::setMethodEnabled() ("ui.at") or all with
@@ -109,6 +120,65 @@ class ScriptEngine;
 // Changes stay after the run ends unless it calls ui.restore(); what a run
 // changed is remembered only while it runs.
 //
+// Creating (what a run created goes when the run ends, also when it is
+// stopped; a script keeps a dialog open by staying alive - on() handlers do
+// that):
+//   ui.create(spec, {parent?, at?}?)
+//                                   builds a widget or a whole tree in one call
+//                                   and returns {id, ids: {name: id}} - the
+//                                   top widget and every named one. A spec:
+//                                   {class, name?, title?, <property>: value,
+//                                    layout?: {type: "vbox"|"hbox"|"grid"|"form",
+//                                              spacing?, margins?, items: [...]},
+//                                    children?: [spec] (pages of a QTabWidget,
+//                                              named by their title; widgets
+//                                              of a QSplitter; the one of a
+//                                              QScrollArea),
+//                                    items?: ["text"] (QComboBox, QListWidget),
+//                                    role?: "accept"|"reject" (a button that
+//                                              closes its dialog so)}
+//                                   Properties as ui.setProperty() takes them;
+//                                   `title` is the window title where the class
+//                                   has no "title". An item of a layout is a
+//                                   spec with its place: stretch (box); row,
+//                                   column, rowSpan, columnSpan (grid; row
+//                                   defaults to the item's index, column to 0);
+//                                   label (form). {stretch: n} alone is a
+//                                   stretch in a box. A QDialogButtonBox
+//                                   accepts or rejects its dialog. Without
+//                                   `parent` the widget is a window of its own,
+//                                   closed until ui.show() or ui.exec(); with
+//                                   it, it goes into the parent's layout at
+//                                   `at` as in ui.moveToLayout(), or onto the
+//                                   parent when that has no layout. Only the
+//                                   classes allowed (widgetClasses()) are made.
+//   ui.exec(dialog)                 opens a QDialog, modal for the user, and
+//                                   waits until it closes - the script waits,
+//                                   the application does not; returns
+//                                   {accepted, button?: the objectName, else
+//                                   the text, of the button clicked last}
+//   ui.close(widget)                closes it (a dialog: rejected); not the root
+//   ui.destroy(widget)              deletes a widget this run created, or one
+//                                   below it
+//
+// Signals (read-only; a run's connections end with it):
+//   ui.connect(widget, signal)      forwards the widget's signal - any widget,
+//                                   created or the application's - to this run
+//                                   as an event and returns the event's name,
+//                                   "ui:<id>:<signal>": on(ui.connect(ok,
+//                                   "clicked"), fn). `signal` is a name
+//                                   ("clicked": its overload with the most
+//                                   arguments) or a signature
+//                                   ("currentIndexChanged(int)"). The event:
+//                                   {widget: id, signal, args: [...]} plus each
+//                                   argument by its name ("checked", "index";
+//                                   "text", "value" or "arg<n>" where Qt has
+//                                   none). A widget argument is its id; a
+//                                   string argument of a password field, or of
+//                                   any widget with setTextReadable(false), is
+//                                   null.
+//   ui.disconnect(widget, signal)   stops it; returns whether it was connected
+//
 // A node: {id, name, class, rect: {x, y, width, height} in root
 // coordinates, visible, enabled, focus (the focus widget of its window),
 // text?}. `widget` is an id (a number) or an objectName (the first in tree
@@ -139,7 +209,9 @@ class ScriptEngine;
 // other method, under the approval rules set (setApproval): reading the UI
 // reveals how the application is built and what its widgets show, and the
 // changing tools can rearrange it. Switch the group or single tools off, or
-// hide widgets, if that matters.
+// hide widgets, if that matters. Signals reach a requested run only with
+// ScriptEngine::allowEventForRequestedRuns("ui"); ui.connect() refuses
+// otherwise.
 //
 // One ScriptUi per engine: a second one exposed on the same engine takes the
 // ui methods over. It is a child of the root: delete it to stop - the ui
@@ -162,10 +234,24 @@ public:
     void setTextReadable(bool readable) { m_textReadable = readable; }
     bool isTextReadable() const { return m_textReadable; }
 
+    // The classes ui.create() makes. Allowed from the start: QWidget,
+    // QDialog, QFrame, QGroupBox, QTabWidget, QScrollArea, QSplitter, QLabel,
+    // QPushButton, QToolButton, QCheckBox, QRadioButton, QLineEdit, QTextEdit,
+    // QPlainTextEdit, QSpinBox, QDoubleSpinBox, QSlider, QComboBox,
+    // QListWidget, QProgressBar, QDialogButtonBox. A factory returns a new
+    // widget without a parent; adding a name again replaces its factory.
+    //   ui->addWidgetFactory("Gauge", [] { return new Gauge; });
+    using WidgetFactory = std::function<QWidget*()>;
+    void addWidgetFactory(const QString& className, WidgetFactory factory);
+    void removeWidgetClass(const QString& className);
+    QStringList widgetClasses() const;
+
 private:
     void add(ScriptMethod method, ScriptMethodHandler handler, bool readOnly = true);
+    void addAsync(ScriptMethod method, AsyncScriptMethodHandler handler);
     void registerMethods();
     void registerChangingMethods();
+    void registerCreatingMethods();
 
     // Resolving and describing widgets - what every ui tool builds on. The
     // ones that find a widget throw ScriptError when there is none.
@@ -205,10 +291,33 @@ private:
     QJsonValue setStretch(QWidget* widget, int stretch, const QJsonObject& args);
     QJsonValue moveToLayout(QWidget* widget, QWidget* target, const QJsonObject& at);
 
+    // Creating, and signals.
+    struct Built
+    {
+        QJsonObject                          ids;       // name -> id
+        QList<QPair<QAbstractButton*, bool>> roles;     // a button, and whether it accepts
+        QList<QDialogButtonBox*>             boxes;
+    };
+    QJsonValue create(const QJsonObject& spec, const QJsonObject& options);
+    // The spec's widget with everything below it, without a parent; the
+    // caller owns it.
+    QWidget* build(const QJsonObject& spec, Built* built);
+    void buildLayout(QWidget* owner, const QJsonObject& spec, Built* built);
+    void exec(const QJsonObject& args, ScriptCompletion done);
+    // Created by the calling run, or below such a widget.
+    bool isCreated(const QWidget* widget) const;
+    // The index of the signal in the widget's class, and its event's name.
+    int signalOf(QWidget* widget, const QString& signal, QString* event) const;
+    QJsonValue connectSignal(QWidget* widget, const QString& signal);
+    QJsonObject signalData(QWidget* widget, int index, void** argv) const;
+
     QPointer<ScriptEngine> m_engine;
     QPointer<QWidget>      m_root;
     bool                   m_textReadable = true;
     QHash<quint64, QList<std::function<bool()>>> m_journal;    // run -> its undo steps, oldest first
+    QHash<quint64, QList<QPointer<QWidget>>>     m_created;    // run -> the top widgets it created
+    QHash<quint64, QHash<QString, QPointer<QObject>>> m_connections;   // run -> event -> forwarder
+    QHash<QString, WidgetFactory>                m_factories;  // class -> factory
 };
 
 // Registers the ui methods for `root`'s widget tree. Returns the ScriptUi, a

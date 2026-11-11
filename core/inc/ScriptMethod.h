@@ -102,7 +102,9 @@ public:
     // Turns the arguments of a call into the named input a handler gets and
     // checks it against the definition (types repaired where unambiguous,
     // defaults applied). A single object passed to a method with several
-    // parameters is taken as named arguments. Returns false with *error set.
+    // parameters is taken as named arguments - unless the first parameter
+    // is of type "object": then it is that argument. Returns false with
+    // *error set.
     bool bindArguments(const QJsonArray& arguments, QJsonObject& named, QString* error) const;
 
 private:

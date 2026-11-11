@@ -4,20 +4,28 @@
 // tree, ids, find/at/info/property, focus and tab order - and see nothing
 // outside the root, nothing hidden, no ScriptHost widget and no password.
 // They change it with the changing ui methods, and ui.restore() undoes what
-// a run changed.
+// a run changed. They build dialogs with ui.create, run them with ui.exec
+// and get widget signals as events; what a run made goes with it.
 
 #include "UnitTest.h"
 #include "TestSupport.h"
+#include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QProgressBar>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -44,6 +52,11 @@ public:
         ADD_TEST(TST_ScriptUi::testSetProperty);
         ADD_TEST(TST_ScriptUi::testRestore);
         ADD_TEST(TST_ScriptUi::testDryRunAndSwitchedOffTools);
+        ADD_TEST(TST_ScriptUi::testCreateDialogTree);
+        ADD_TEST(TST_ScriptUi::testCreateIntoLayoutAndClasses);
+        ADD_TEST(TST_ScriptUi::testExecCloseAndDestroy);
+        ADD_TEST(TST_ScriptUi::testSignals);
+        ADD_TEST(TST_ScriptUi::testCreatedWidgetsGoAndSwitches);
     }
 
 private:
@@ -179,6 +192,37 @@ private:
     {
         return run(engine, code)["message"].toString();
     }
+
+    // A run that goes on after `code` - which logs "ready" at its end - until
+    // the test posts "end" to it (and no other handler is left) or stops it.
+    struct Live
+    {
+        QObject       context;
+        Engine::RunId id = 0;
+        bool          done = false;
+        QJsonObject   result;
+        QStringList   log;
+
+        Live(Engine& engine, const QString& code)
+        {
+            QObject::connect(&engine, &Engine::runLog, &context, [this](Engine::RunId run, const QString& text) {
+                if (run == id)
+                    log << text;
+            });
+            id = engine.run("on('end', () => off('end'));\n" + code + "\nlog('ready');", Engine::RunOptions(),
+                            [this](const QJsonObject& r) {
+                                result = r;
+                                done = true;
+                            });
+        }
+
+        bool waitFor(const QString& line)
+        {
+            return TestSupport::spin([this, line]() { return log.contains(line) || done; }) && log.contains(line);
+        }
+
+        QJsonObject json(int line) const { return QJsonDocument::fromJson(log.value(line).toUtf8()).object(); }
+    };
 
     static QJsonValue value(Engine& engine, const QString& code)
     {
@@ -551,7 +595,7 @@ private:
         auto* w = new Window;
         QPointer<ScriptHost::ScriptUi> ui = ScriptHost::exposeWidgets(&engine, &w->window);
 
-        // Ten read-only methods and eighteen changing ones, all in the group "UI".
+        // Twelve read-only methods and twenty-two changing ones, all in the group "UI".
         QStringList reading, changing;
         for (const ScriptHost::ScriptMethod& m : engine.methods()) {
             if (!m.name().startsWith("ui."))
@@ -559,9 +603,11 @@ private:
             (m.isReadOnly() ? reading : changing) << m.name();
             TEST_COMPARE(m.group(), QString("UI"));
         }
-        TEST_COMPARE(reading, (QStringList{"ui.at", "ui.children", "ui.find", "ui.focused", "ui.info", "ui.parent",
-                                           "ui.property", "ui.root", "ui.tabOrder", "ui.tree"}));
-        TEST_COMPARE(changing, (QStringList{"ui.hide", "ui.lower", "ui.move", "ui.moveToLayout", "ui.raise",
+        TEST_COMPARE(reading, (QStringList{"ui.at", "ui.children", "ui.connect", "ui.disconnect", "ui.find",
+                                           "ui.focused", "ui.info", "ui.parent", "ui.property", "ui.root",
+                                           "ui.tabOrder", "ui.tree"}));
+        TEST_COMPARE(changing, (QStringList{"ui.close", "ui.create", "ui.destroy", "ui.exec", "ui.hide", "ui.lower",
+                                            "ui.move", "ui.moveToLayout", "ui.raise",
                                             "ui.reorder", "ui.resize", "ui.restore", "ui.setCurrentIndex",
                                             "ui.setEnabled", "ui.setFocus", "ui.setGeometry", "ui.setLayout",
                                             "ui.setProperty", "ui.setSplitterSizes", "ui.setStretch",
@@ -973,6 +1019,304 @@ private:
         engine.setMethodEnabled("ui.hide", true);
         TEST_COMPARE(done(engine, "ui.hide('okButton');"), QString("ok"));
         TEST_ASSERT(w.ok->isHidden());
+    }
+
+    TEST_FUNCTION(testCreateDialogTree)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+
+        // One call, the whole tree.
+        Live live(engine,
+            "const d = ui.create({class: 'QDialog', name: 'ask', title: 'Question', layout: {type: 'vbox', "
+            "    spacing: 4, items: ["
+            "  {class: 'QLabel', name: 'prompt', text: 'Your name?', wordWrap: true},"
+            "  {class: 'QLineEdit', name: 'answer', placeholderText: 'Name', maxLength: 20},"
+            "  {class: 'QWidget', layout: {type: 'grid', items: ["
+            "    {class: 'QCheckBox', name: 'remember', text: 'Remember', checked: true},"
+            "    {class: 'QSpinBox', name: 'age', value: 120, maximum: 150, row: 0, column: 1}]}},"
+            "  {class: 'QComboBox', name: 'colour', items: ['red', 'green', 'blue'], currentIndex: 2},"
+            "  {class: 'QTabWidget', name: 'pages', children: [{class: 'QWidget', title: 'One'},"
+            "                                                  {class: 'QWidget', title: 'Two'}]},"
+            "  {class: 'QWidget', layout: {type: 'form', items: [{class: 'QLineEdit', name: 'city', label: 'City'}]}},"
+            "  {class: 'QWidget', layout: {type: 'hbox', items: [{stretch: 1},"
+            "    {class: 'QPushButton', name: 'ok', text: 'OK', role: 'accept'}]}}]}});"
+            "log(JSON.stringify(d));"
+            "log(ui.property(d.ids.age, 'value') + ' ' + ui.info(d.id).text);");
+        TEST_ASSERT(live.waitFor("ready"));
+        TEST_COMPARE(live.log.value(1), QString("120 Question"));
+        const QJsonObject made = live.json(0);
+        auto* dialog = w.window.findChild<QDialog*>("ask");
+        TEST_ASSERT(dialog);
+        TEST_ASSERT(dialog->isWindow() && dialog->parentWidget() == &w.window && !dialog->isVisible());
+        TEST_COMPARE(dialog->windowTitle(), QString("Question"));
+        TEST_COMPARE(made["id"].toInt(), dialog->property("scripthost_id").toInt());
+        const QJsonObject ids = made["ids"].toObject();
+        TEST_COMPARE(ids.keys(), (QStringList{"age", "answer", "ask", "city", "colour", "ok", "pages", "prompt",
+                                              "remember"}));
+        TEST_COMPARE(dialog->layout()->spacing(), 4);
+        auto* answer = dialog->findChild<QLineEdit*>("answer");
+        TEST_ASSERT(answer && answer->placeholderText() == "Name" && answer->maxLength() == 20);
+        TEST_COMPARE(ids["answer"].toInt(), answer->property("scripthost_id").toInt());
+        TEST_ASSERT(dialog->findChild<QLabel*>("prompt")->wordWrap());
+        // A grid: row from the item's index unless given, column 0 unless given.
+        auto* age = dialog->findChild<QSpinBox*>("age");
+        TEST_ASSERT(age && age->maximum() == 150 && age->value() == 120);
+        auto* grid = qobject_cast<QGridLayout*>(age->parentWidget()->layout());
+        TEST_ASSERT(grid && grid->itemAtPosition(0, 1)->widget() == age);
+        TEST_ASSERT(grid->itemAtPosition(0, 0)->widget() == dialog->findChild<QCheckBox*>("remember"));
+        TEST_ASSERT(dialog->findChild<QCheckBox*>("remember")->isChecked());
+        auto* colour = dialog->findChild<QComboBox*>("colour");
+        TEST_ASSERT(colour->count() == 3 && colour->currentText() == "blue");
+        auto* pages = dialog->findChild<QTabWidget*>("pages");
+        TEST_ASSERT(pages->count() == 2 && pages->tabText(1) == "Two");
+        auto* city = dialog->findChild<QLineEdit*>("city");
+        auto* form = qobject_cast<QFormLayout*>(city->parentWidget()->layout());
+        TEST_ASSERT(form && qobject_cast<QLabel*>(form->labelForField(city))->text() == "City");
+        // A button with a role closes its dialog.
+        dialog->show();
+        dialog->findChild<QPushButton*>("ok")->click();
+        TEST_ASSERT(!dialog->isVisible() && dialog->result() == QDialog::Accepted);
+
+        // Made by the run: gone when it ends.
+        const QPointer<QDialog> gone(dialog);
+        engine.postEvent(live.id, "end", QJsonObject());
+        TEST_ASSERT(TestSupport::spin([&]() { return live.done && gone.isNull(); }));
+        TEST_COMPARE(live.result["status"].toString(), QString("ok"));
+    }
+
+    TEST_FUNCTION(testCreateIntoLayoutAndClasses)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        w.show();
+        ScriptHost::ScriptUi* ui = ScriptHost::exposeWidgets(&engine, &w.window);
+        auto* row = static_cast<QBoxLayout*>(w.buttons->layout());
+
+        // Into the application's layout, at a place; an app factory's class.
+        ui->addWidgetFactory("Gauge", []() -> QWidget* { return new QProgressBar; });
+        TEST_ASSERT(ui->widgetClasses().contains("Gauge") && ui->widgetClasses().contains("QDialog"));
+        Live live(engine,
+            "const help = ui.create({class: 'QPushButton', name: 'help', text: 'Help'}, "
+            "                       {parent: 'buttons', at: {index: 1}});"
+            "ui.create({class: 'Gauge', name: 'gauge', value: 40}, {parent: 'window'});"
+            "log(help.id);");
+        TEST_ASSERT(live.waitFor("ready"));
+        auto* help = w.buttons->findChild<QPushButton*>("help");
+        TEST_ASSERT(help && help->parentWidget() == w.buttons);
+        TEST_COMPARE(row->indexOf(help), 1);
+        TEST_COMPARE(live.log.value(0).toInt(), help->property("scripthost_id").toInt());
+        TEST_ASSERT(TestSupport::spin([&]() { return help->isVisible(); }));
+        auto* gauge = w.window.findChild<QProgressBar*>("gauge");
+        TEST_ASSERT(gauge && gauge->value() == 40);
+        TEST_COMPARE(w.window.layout()->indexOf(gauge), w.window.layout()->count() - 1);
+        const QPointer<QWidget> gone(help);
+        engine.postEvent(live.id, "end", QJsonObject());
+        TEST_ASSERT(TestSupport::spin([&]() { return live.done && gone.isNull(); }));
+        TEST_COMPARE(row->count(), 3);
+
+        // Only the classes allowed; nothing is made when any part is wrong.
+        const int widgets = w.window.findChildren<QWidget*>().size();
+        TEST_COMPARE(error(engine, "ui.create({class: 'QFileDialog'});"),
+                     QString("ui.create: the class 'QFileDialog' is not allowed"));
+        ui->removeWidgetClass("QLineEdit");
+        TEST_ASSERT(!ui->widgetClasses().contains("QLineEdit"));
+        TEST_COMPARE(error(engine, "ui.create({class: 'QDialog', layout: {type: 'vbox', items: ["
+                                   "{class: 'QLabel', text: 'a'}, {class: 'QLineEdit'}]}});"),
+                     QString("ui.create: the class 'QLineEdit' is not allowed"));
+        TEST_COMPARE(error(engine, "ui.create({class: 'QLabel', nope: 1});"),
+                     QString("ui.create: a QLabel has no property 'nope'"));
+        TEST_COMPARE(error(engine, "ui.create({class: 'QSpinBox', value: 'x'});"),
+                     QString("ui.create: 'value' takes a number"));
+        TEST_COMPARE(error(engine, "ui.create({class: 'QLabel', items: ['a']});"),
+                     QString("ui.create: a QLabel takes no items"));
+        TEST_COMPARE(error(engine, "ui.create({class: 'QPushButton', role: 'accept'});"),
+                     QString("ui.create: a button with a role must be in a dialog"));
+        TEST_COMPARE(error(engine, "ui.create({class: 'QWidget', layout: {type: 'diagonal'}});"),
+                     QString("ui.create: a layout's type is \"vbox\", \"hbox\", \"grid\" or \"form\", not 'diagonal'"));
+        TEST_COMPARE(error(engine, "ui.create({class: 'QLabel'}, {parent: 'buttons', at: {index: 9}});"),
+                     QString("ui.create: the index 9 is not between 0 and 3"));
+        TestSupport::spin([]() { return false; }, 50);
+        TEST_COMPARE(w.window.findChildren<QWidget*>().size(), widgets);
+    }
+
+    TEST_FUNCTION(testExecCloseAndDestroy)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+
+        // The script waits for the dialog; the application goes on.
+        Live live(engine,
+            "const d = ui.create({class: 'QDialog', name: 'ask', layout: {type: 'vbox', items: ["
+            "  {class: 'QLineEdit', name: 'answer'},"
+            "  {class: 'QDialogButtonBox', name: 'box', standardButtons: 'Ok|Cancel'}]}});"
+            "const first = ui.exec(d.id);"
+            "log(JSON.stringify(first) + ' ' + ui.property('answer', 'text'));"
+            "log(JSON.stringify(ui.exec(d.id)));");
+        QPointer<QDialog> dialog;
+        TEST_ASSERT(TestSupport::spin([&]() {
+            dialog = w.window.findChild<QDialog*>("ask");
+            return dialog && dialog->isVisible();
+        }));
+        TEST_ASSERT(dialog->isModal() && dialog->isWindow());
+        auto* box = dialog->findChild<QDialogButtonBox*>("box");
+        dialog->findChild<QLineEdit*>("answer")->setText("Bob");
+        box->button(QDialogButtonBox::Ok)->click();
+        TEST_ASSERT(live.waitFor("{\"accepted\":true,\"button\":\"OK\"} Bob"));
+        TEST_ASSERT(TestSupport::spin([&]() { return dialog->isVisible(); }));
+        box->button(QDialogButtonBox::Cancel)->click();
+        TEST_ASSERT(live.waitFor("{\"accepted\":false,\"button\":\"Cancel\"}"));
+        TEST_ASSERT(live.waitFor("ready"));
+        TEST_ASSERT(!w.window.findChild<QDialog*>("ask")->isVisible());
+        engine.postEvent(live.id, "end", QJsonObject());
+        TEST_ASSERT(TestSupport::spin([&]() { return live.done && dialog.isNull(); }));
+        TEST_COMPARE(error(engine, "ui.exec('okButton');"), QString("ui.exec: the widget is not a QDialog"));
+
+        // Closing; destroying only what the run made.
+        const QJsonObject closed = value(engine,
+            "const d = ui.create({class: 'QDialog', name: 'note', layout: {type: 'vbox', items: ["
+            "  {class: 'QLabel', name: 'line', text: 'x'}]}});"
+            "const shown = ui.show(d.id).visible;"
+            "const after = ui.close(d.id).visible;"
+            "ui.destroy('line');"
+            "const lines = ui.find({name: 'line'}).length;"
+            "ui.destroy(d.id);"
+            "return {shown, after, lines, notes: ui.find({name: 'note'}).length};").toObject();
+        TEST_COMPARE(closed, (QJsonObject{{"shown", true}, {"after", false}, {"lines", 0}, {"notes", 0}}));
+        TEST_COMPARE(error(engine, "ui.destroy('okButton');"),
+                     QString("ui.destroy: only a widget this run created can be destroyed"));
+        TEST_COMPARE(error(engine, "ui.close('window');"), QString("ui.close: the root cannot be closed"));
+        TEST_ASSERT(w.window.isVisible() && w.ok);
+    }
+
+    TEST_FUNCTION(testSignals)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+
+        Live live(engine,
+            "const d = ui.create({class: 'QDialog', name: 'form', layout: {type: 'vbox', items: ["
+            "  {class: 'QPushButton', name: 'go', text: 'Go', checkable: true},"
+            "  {class: 'QLineEdit', name: 'field'},"
+            "  {class: 'QSpinBox', name: 'count'},"
+            "  {class: 'QComboBox', name: 'pick', items: ['a', 'b', 'c']},"
+            "  {class: 'QLineEdit', name: 'secret', echoMode: 'Password'}]}});"
+            "on(ui.connect('go', 'clicked'), e => log('clicked ' + e.checked + ' ' + e.widget + ' ' + e.signal));"
+            "log('name ' + ui.connect('go', 'clicked'));"
+            "on(ui.connect('field', 'textChanged'), e => log('text ' + e.text));"
+            "on(ui.connect('count', 'valueChanged(int)'), e => log('value ' + e.value + ' ' + e.args[0]));"
+            "on(ui.connect('pick', 'currentIndexChanged(int)'), e => log('index ' + e.index));"
+            "on(ui.connect('secret', 'textChanged'), e => log('secret ' + e.text));"
+            "on(ui.connect('okButton', 'clicked'), e => log('app ' + e.checked));"
+            "on('off', () => log('off ' + ui.disconnect('field', 'textChanged') + ' '"
+            "                    + ui.disconnect('field', 'textChanged')));");
+        TEST_ASSERT(live.waitFor("ready"));
+        auto* dialog = w.window.findChild<QDialog*>("form");
+        TEST_ASSERT(dialog);
+        auto* go = dialog->findChild<QPushButton*>("go");
+        const int goId = go->property("scripthost_id").toInt();
+        TEST_ASSERT(live.log.contains(QString("name ui:%1:clicked").arg(goId)));
+
+        // Created widgets and the application's, with the arguments by name.
+        go->click();
+        TEST_ASSERT(live.waitFor(QString("clicked true %1 clicked").arg(goId)));
+        dialog->findChild<QLineEdit*>("field")->setText("hi");
+        TEST_ASSERT(live.waitFor("text hi"));
+        dialog->findChild<QSpinBox*>("count")->setValue(5);
+        TEST_ASSERT(live.waitFor("value 5 5"));
+        dialog->findChild<QComboBox*>("pick")->setCurrentIndex(2);
+        TEST_ASSERT(live.waitFor("index 2"));
+        dialog->findChild<QLineEdit*>("secret")->setText("pw");
+        TEST_ASSERT(live.waitFor("secret null"));
+        w.ok->click();
+        TEST_ASSERT(live.waitFor("app false"));
+
+        // Disconnected: no more events of it.
+        engine.postEvent(live.id, "off", QJsonObject());
+        TEST_ASSERT(live.waitFor("off true false"));
+        dialog->findChild<QLineEdit*>("field")->setText("again");
+        go->click();
+        TEST_ASSERT(live.waitFor(QString("clicked false %1 clicked").arg(goId)));
+        TEST_ASSERT(!live.log.contains("text again"));
+
+        // Stopped: its widgets and connections go.
+        const QPointer<QDialog> gone(dialog);
+        engine.stop(live.id);
+        TEST_ASSERT(TestSupport::spin([&]() { return live.done && gone.isNull(); }));
+        TEST_COMPARE(live.result["phase"].toString(), QString("cancelled"));
+        const int lines = live.log.size();
+        w.ok->click();
+        TestSupport::spin([]() { return false; }, 50);
+        TEST_COMPARE(live.log.size(), lines);
+
+        // Requested runs: with the "ui" opt-in only.
+        const QString code("const n = ui.connect('okButton', 'clicked'); on(n, () => {}); off(n); return n;");
+        const QJsonObject blocked = TestSupport::request(engine, TestSupport::codeRequest(code));
+        TEST_COMPARE(blocked["message"].toString(),
+                     QString("ui.connect: the application does not let requested scripts receive widget signals"));
+        engine.allowEventForRequestedRuns("ui");
+        const QJsonObject allowed = TestSupport::request(engine, TestSupport::codeRequest(code));
+        TEST_COMPARE(allowed["result"].toString(),
+                     QString("ui:%1:clicked").arg(w.ok->property("scripthost_id").toInt()));
+    }
+
+    TEST_FUNCTION(testCreatedWidgetsGoAndSwitches)
+    {
+        TEST_START;
+
+        Engine engine;
+        Window w;
+        w.show();
+        ScriptHost::exposeWidgets(&engine, &w.window);
+
+        // Stopped while a dialog is open: it goes.
+        Live live(engine, "ui.show(ui.create({class: 'QDialog', name: 'open'}).id);");
+        TEST_ASSERT(live.waitFor("ready"));
+        const QPointer<QDialog> dialog = w.window.findChild<QDialog*>("open");
+        TEST_ASSERT(dialog && dialog->isVisible());
+        engine.stop(live.id);
+        TEST_ASSERT(TestSupport::spin([&]() { return live.done && dialog.isNull(); }));
+
+        // ui.restore() takes it away at once.
+        TEST_COMPARE(value(engine, "ui.create({class: 'QLabel', name: 'tmp'}, {parent: 'window'});"
+                                   "const before = ui.find({name: 'tmp'}).length; ui.restore();"
+                                   "return before;").toInt(), 1);
+
+        // A dry run makes nothing.
+        TestSupport::Options options;
+        options.dryRun = true;
+        const QJsonObject dry = run(engine, "return ui.create({class: 'QDialog', name: 'dry'}).ids;", options);
+        TEST_COMPARE(dry["status"].toString(), QString("ok"));
+        TEST_ASSERT(!w.window.findChild<QDialog*>("dry"));
+
+        // Each tool switched off alone.
+        for (const QString& name : {"ui.create", "ui.exec", "ui.close", "ui.destroy", "ui.connect",
+                                    "ui.disconnect"}) {
+            engine.setMethodEnabled(name, false);
+            const Engine::Check check = engine.check(name + "('okButton');");
+            TEST_ASSERT(!check.ok && check.message.contains("disabled"));
+            engine.setMethodEnabled(name, true);
+        }
+        engine.setMethodEnabled("ui.create", false);
+        TEST_COMPARE(run(engine, "ui.create({class: 'QLabel'});")["status"].toString(), QString("error"));
+        TEST_COMPARE(value(engine, "const n = ui.connect('okButton', 'clicked'); return n.startsWith('ui:');")
+                         .toBool(), true);
+        TestSupport::spin([]() { return false; }, 50);
+        TEST_ASSERT(!w.window.findChild<QLabel*>("tmp"));
     }
 };
 

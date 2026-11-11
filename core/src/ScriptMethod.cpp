@@ -344,8 +344,10 @@ bool ScriptMethod::bindArguments(const QJsonArray& arguments, QJsonObject& named
         const QString firstType = m_order.isEmpty()
             ? QString()
             : properties.value(m_order.first()).toObject().value(QStringLiteral("type")).toString();
-        const bool firstTakesObject = m_order.size() == 1
-            && (firstType.isEmpty() || firstType == QLatin1String("object"));
+        // ui.create({class: "QLabel"}, {parent: 3}) - an object for a first
+        // parameter that takes one is that argument.
+        const bool firstTakesObject = firstType == QLatin1String("object")
+            || (m_order.size() == 1 && firstType.isEmpty());
         if (arguments.size() == 1 && arguments.first().isObject() && !m_order.isEmpty() && !firstTakesObject) {
             // db.setProperty({id: "a1", name: "status"}) - named arguments.
             input = arguments.first().toObject();
