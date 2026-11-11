@@ -163,15 +163,18 @@ void InventoryWindow::setUpScripting()
         QJsonDocument::fromJson(QSettings().value(kScriptSettingsKey).toByteArray()).object());
 
     // ---- 7. What scripts do -----------------------------------------------
-    connect(m_engine, &ScriptHost::ScriptEngine::runStarted, this, [this](const QString& name, bool external) {
+    connect(m_engine, &ScriptHost::ScriptEngine::runStarted, this,
+            [this](ScriptHost::ScriptEngine::RunId, const QString& name, bool external) {
         appendLog(QString("[run] %1 started by %2")
                       .arg(name.isEmpty() ? QString("a script") : "'" + name + "'",
                            external ? m_engine->requesterName() : QString("the user")));
     });
-    connect(m_engine, &ScriptHost::ScriptEngine::runLog, this, [this](const QString& text) {
+    connect(m_engine, &ScriptHost::ScriptEngine::runLog, this,
+            [this](ScriptHost::ScriptEngine::RunId, const QString& text) {
         appendLog("[log] " + text);
     });
-    connect(m_engine, &ScriptHost::ScriptEngine::runFinished, this, [this](const QJsonObject& result) {
+    connect(m_engine, &ScriptHost::ScriptEngine::runFinished, this,
+            [this](ScriptHost::ScriptEngine::RunId, const QJsonObject& result) {
         appendLog("[run] finished: " + compact(result).left(400));
     });
 }

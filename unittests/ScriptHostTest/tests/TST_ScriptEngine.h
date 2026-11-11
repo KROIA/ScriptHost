@@ -82,7 +82,7 @@ private:
         TEST_ASSERT(!engine.runs().first().external);
         TEST_COMPARE(engine.runs().first().args["minAge"].toInt(), 40);
         TEST_ASSERT(!engine.isRunning());
-        TEST_ASSERT(!engine.isExternalRun());
+        TEST_ASSERT(engine.activeRuns().isEmpty());
     }
 
     TEST_FUNCTION(testSyntaxErrorHasTheLine)
@@ -398,10 +398,10 @@ private:
 
         Engine engine;
         QStringList logged;
-        QObject::connect(&engine, &Engine::runLog, [&](const QString& text) { logged << text; });
+        QObject::connect(&engine, &Engine::runLog, [&](Engine::RunId, const QString& text) { logged << text; });
         QList<double> progress;
         QObject::connect(&engine, &Engine::runProgress,
-                         [&](double done, double total, const QString&) { progress << done << total; });
+                         [&](Engine::RunId, double done, double total, const QString&) { progress << done << total; });
 
         QJsonObject result = TestSupport::runScript(engine,
             "log('start', 3, {a: 1});\nprogress(1, 2, 'half');\nreturn [1, 'two', {three: 3}, null];\n");
@@ -545,7 +545,7 @@ private:
             int started = 0;
             bool startedExternal = true;
             QString startedName;
-            QObject::connect(&engine, &Engine::runStarted, [&](const QString& name, bool external) {
+            QObject::connect(&engine, &Engine::runStarted, [&](Engine::RunId, const QString& name, bool external) {
                 ++started;
                 startedName = name;
                 startedExternal = external;
@@ -553,23 +553,28 @@ private:
 
             Options options;
             options.name = "Sleeper";
-            TEST_ASSERT(engine.run("sleep(60000);\nreturn 1;", options, [&](const QJsonObject& r) {
+            Engine::Limits limits;
+            limits.maxConcurrentRuns = 1;
+            engine.setLimits(limits);
+            const Engine::RunId id = engine.run("sleep(60000);\nreturn 1;", options, [&](const QJsonObject& r) {
                 result = r;
                 done = true;
-            }));
+            });
+            TEST_ASSERT(id != 0);
             TEST_COMPARE(started, 1);
             TEST_COMPARE(startedName, QString("Sleeper"));
             TEST_ASSERT(!startedExternal);
             TEST_ASSERT(engine.isRunning());
-            TEST_ASSERT(!engine.isExternalRun());
+            TEST_ASSERT(engine.isRunning(id));
+            TEST_ASSERT(!engine.isExternalRun(id));
 
-            // One at a time.
+            // No more than the limit allows.
             QJsonObject second;
-            TEST_ASSERT(!engine.run("return 2;", Options(), [&](const QJsonObject& r) { second = r; }));
+            TEST_COMPARE(engine.run("return 2;", Options(), [&](const QJsonObject& r) { second = r; }), Engine::RunId(0));
             TEST_COMPARE(second["status"].toString(), QString("error"));
-            TEST_ASSERT(second["message"].toString().contains("another script"));
+            TEST_ASSERT(second["message"].toString().contains("the limit of 1"));
 
-            engine.stop();
+            engine.stop(id);
             TEST_ASSERT(TestSupport::spin([&]() { return done; }, 5000));
             TEST_COMPARE(result["phase"].toString(), QString("cancelled"));
             TEST_ASSERT(!engine.isRunning());
@@ -619,7 +624,7 @@ private:
         });
         TestSupport::spin([]() { return false; }, 100);
         TEST_ASSERT(engine.isRunning());
-        engine.stop();
+        engine.stopAll();
         TEST_ASSERT(TestSupport::spin([&]() { return done; }, 5000));
         TEST_COMPARE(result["phase"].toString(), QString("cancelled"));
     }
@@ -719,8 +724,9 @@ private:
         QStringList names;
         for (const ScriptHost::ScriptMethod& method : engine.methods())
             names << method.name();
-        TEST_COMPARE(names, (QStringList{"db.find", "db.list", "db.read", "db.setStatus",
-                                         "log", "pause", "progress", "sleep"}));
+        TEST_COMPARE(names, (QStringList{"clearInterval", "clearTimeout", "db.find", "db.list", "db.read",
+                                         "db.setStatus", "log", "pause", "progress", "setInterval",
+                                         "setTimeout", "sleep"}));
     }
 
     TEST_FUNCTION(testUserSettingsAndLocks)
@@ -809,7 +815,7 @@ private:
         QStringList returned;
         bool autoStep = true;
         QObject::connect(&engine, &Engine::runPaused,
-                         [&](int line, const QString& method, const QJsonArray& arguments) {
+                         [&](Engine::RunId, int line, const QString& method, const QJsonArray& arguments) {
             stops.append({line, method, arguments});
             if (autoStep)
                 engine.stepRun();
@@ -817,7 +823,7 @@ private:
                 engine.continueRun();
         });
         QObject::connect(&engine, &Engine::runCallFinished,
-                         [&](int line, const QString& method, const QJsonArray&, const QJsonValue& value,
+                         [&](Engine::RunId, int line, const QString& method, const QJsonArray&, const QJsonValue& value,
                              const QString& error) {
             returned << QString("%1:%2:%3").arg(line).arg(method,
                 error.isEmpty() ? QString::fromUtf8(QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact)).left(24)
@@ -893,7 +899,7 @@ private:
         TEST_ASSERT(TestSupport::spin([&]() { return paused; }, 5000));
         TestSupport::spin([]() { return false; }, 500);
         TEST_ASSERT(engine.isRunning());                    // still waiting, not timed out
-        engine.stop();
+        engine.stopAll();
         TEST_ASSERT(TestSupport::spin([&]() { return done; }, 5000));
         TEST_COMPARE(result["phase"].toString(), QString("cancelled"));
 
@@ -917,7 +923,7 @@ private:
         QList<Stop> stops;
         int mode = 0;       // 0 next statement, 1 next call, 2 next breakpoint
         QObject::connect(&engine, &Engine::runPaused,
-                         [&](int line, const QString& method, const QJsonArray&, const QJsonObject& variables) {
+                         [&](Engine::RunId, int line, const QString& method, const QJsonArray&, const QJsonObject& variables) {
             stops.append({line, method, variables});
             if (mode == 0)
                 engine.stepStatement();

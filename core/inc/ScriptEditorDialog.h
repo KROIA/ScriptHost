@@ -26,9 +26,11 @@ class ScriptCodeEdit;
 // arguments, the output, and a reference of the methods a script may call.
 // The Scripts tab (ScriptsWidget) opens it; an application may as well.
 //
-// It reacts only to the runs it started itself: another program may run a
-// script while the window is open, and then the Run buttons just wait.
-// Closing the window stops its run.
+// It reacts only to the run it started itself: other runs (another window's,
+// a requested one, the application's) go on beside it, and its Stop button
+// stops only its own. Only one run can be in the debugger at a time; Debug
+// while another one is there says so in the status line. Closing the window
+// stops its run.
 //
 // Object names, for tests and tools that address widgets:
 //   scripthost_scriptEditorDialog, scripthost_scriptEditorName, scripthost_scriptEditorDescription,
@@ -63,13 +65,14 @@ public:
     int pausedLine() const { return m_pausedLine; }
     // The line marked as broken by Check or a failed run, 0 when none.
     int errorLine() const;
-    bool isOwnRunActive() const { return m_ownRun; }
+    bool isOwnRunActive() const { return m_ownRun != 0; }
 
 public slots:
     // Shows the result in the status line and marks the error line.
     bool checkScript();
     // Start a run of the code in the editor; false when none could start
-    // (another run active, arguments not a JSON object).
+    // (this window's run still active, arguments not a JSON object, the
+    // engine refused it - e.g. another run in the debugger).
     bool runScript(bool dryRun = false);
     bool debugScript();
     // While paused: to the next statement, to the next call, to the next breakpoint.
@@ -90,10 +93,11 @@ public:
 private:
     bool startRun(bool dryRun, bool debug);
     bool parseArgs(QJsonObject& args);
-    void onPaused(int line, const QString& method, const QJsonArray& arguments, const QJsonObject& variables);
+    void onPaused(quint64 run, int line, const QString& method, const QJsonArray& arguments,
+                  const QJsonObject& variables);
     void resume(int how);
     void showVariables(const QJsonObject& variables);
-    void onCallFinished(int line, const QString& method, const QJsonArray& arguments,
+    void onCallFinished(quint64 run, int line, const QString& method, const QJsonArray& arguments,
                         const QJsonValue& value, const QString& error);
     void onOwnRunFinished(const QJsonObject& result);
     void settlePendingCall();
@@ -131,7 +135,8 @@ private:
     QString m_filePath;
     QString m_savedName;        // the name it has in the library, empty for a new one
     bool    m_readOnly = false;
-    bool    m_ownRun = false;   // the active run was started here
+    quint64 m_ownRun = 0;       // ScriptEngine::RunId of the run started here, 0 = none
+    bool    m_ownDebug = false; // m_ownRun is the debug run
     bool    m_paused = false;
     int     m_pausedLine = 0;
     int     m_pendingRow = -1;  // calls row of the call the debugger stopped before

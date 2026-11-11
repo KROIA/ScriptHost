@@ -100,26 +100,35 @@ void ScriptCompletion::fail(const QString& message) const
 
 // ------------------------------------------------------------ construction
 
+struct ScriptEngine::Run
+{
+    ScriptRunner*                   runner = nullptr;
+    QSharedPointer<ScriptRunShared> shared;
+    QHash<QString, Entry>           entries;    // the methods as they were at the start
+    RunCallback                     callback;
+    RunRecord                       record;
+    bool                            debug = false;
+};
+
 ScriptEngine::ScriptEngine(QObject* parent)
     : QObject(parent)
     , m_requesterName(QStringLiteral("another program"))
 {
-    m_timeout = new QTimer(this);
-    m_timeout->setSingleShot(true);
-    connect(m_timeout, &QTimer::timeout, this, [this]() {
-        if (m_runner)
-            m_runner->requestStop(QStringLiteral("timeout"));
-    });
+    // For queued connections and QSignalSpy, which know the run* signals'
+    // parameter types by name.
+    qRegisterMetaType<RunId>("RunId");
     registerBuiltins();
 }
 
 ScriptEngine::~ScriptEngine()
 {
-    if (m_runner) {
-        m_runner->requestStop(QStringLiteral("cancelled"));
-        m_runner->wait();
-        delete m_runner;
-        m_runner = nullptr;
+    // All stopped first, so that they end side by side.
+    for (Run* active : std::as_const(m_active))
+        active->runner->requestStop(QStringLiteral("cancelled"));
+    for (Run* active : std::as_const(m_active)) {
+        active->runner->wait();
+        delete active->runner;
+        delete active;
     }
 }
 
@@ -159,6 +168,42 @@ void ScriptEngine::registerBuiltins()
          .setGroup(group).setReadOnly(true)
          .addParameter(QStringLiteral("label"), QStringLiteral("string"), QStringLiteral("Shown in the debugger"), false);
     add(pause);
+
+    // Timers. The runner makes them JavaScript functions of its own: they
+    // take a function, which cannot cross to the application as JSON.
+    const QJsonObject fn{{"description", "The function to call"}};
+    const QJsonObject rest{{"description", "Further arguments: passed on to fn"}};
+    ScriptMethod setTimeout(QStringLiteral("setTimeout"));
+    setTimeout.setDescription(QStringLiteral("Calls fn once, after ms milliseconds. The script runs on, after its "
+                                             "end, until no timer is left."))
+              .setGroup(group).setReadOnly(true)
+              .addRawParameter(QStringLiteral("fn"), fn)
+              .addParameter(QStringLiteral("ms"), QStringLiteral("number"), QStringLiteral("Milliseconds"), false)
+              .addRawParameter(QStringLiteral("args"), rest, false)
+              .setReturns(QStringLiteral("number"), QStringLiteral("The timer, for clearTimeout"));
+    add(setTimeout);
+
+    ScriptMethod setInterval(QStringLiteral("setInterval"));
+    setInterval.setDescription(QStringLiteral("Calls fn every ms milliseconds (at least 1). The script runs on, "
+                                              "after its end, until no timer is left."))
+               .setGroup(group).setReadOnly(true)
+               .addRawParameter(QStringLiteral("fn"), fn)
+               .addParameter(QStringLiteral("ms"), QStringLiteral("number"), QStringLiteral("Milliseconds"), false)
+               .addRawParameter(QStringLiteral("args"), rest, false)
+               .setReturns(QStringLiteral("number"), QStringLiteral("The timer, for clearInterval"));
+    add(setInterval);
+
+    ScriptMethod clearTimeout(QStringLiteral("clearTimeout"));
+    clearTimeout.setDescription(QStringLiteral("Cancels a timer of setTimeout."))
+                .setGroup(group).setReadOnly(true)
+                .addParameter(QStringLiteral("id"), QStringLiteral("number"), QStringLiteral("What setTimeout returned"));
+    add(clearTimeout);
+
+    ScriptMethod clearInterval(QStringLiteral("clearInterval"));
+    clearInterval.setDescription(QStringLiteral("Stops a timer of setInterval."))
+                 .setGroup(group).setReadOnly(true)
+                 .addParameter(QStringLiteral("id"), QStringLiteral("number"), QStringLiteral("What setInterval returned"));
+    add(clearInterval);
 }
 
 // ------------------------------------------------------------ switches
@@ -634,53 +679,99 @@ ScriptEngine::Check ScriptEngine::check(const QString& code) const
 
 bool ScriptEngine::isRunning() const
 {
-    return m_runner != nullptr;
+    return !m_active.isEmpty();
 }
 
-bool ScriptEngine::isExternalRun() const
+bool ScriptEngine::isRunning(RunId id) const
 {
-    return m_runner != nullptr && m_runRecord.external;
+    return m_active.contains(id);
 }
 
-void ScriptEngine::stop()
+QList<ScriptEngine::RunId> ScriptEngine::activeRuns() const
 {
-    if (m_runner)
-        m_runner->requestStop(QStringLiteral("cancelled"));
+    return m_active.keys();
+}
+
+ScriptEngine::RunRecord ScriptEngine::activeRun(RunId id) const
+{
+    const Run* active = m_active.value(id);
+    return active ? active->record : RunRecord();
+}
+
+bool ScriptEngine::isExternalRun(RunId id) const
+{
+    const Run* active = m_active.value(id);
+    return active && active->record.external;
+}
+
+void ScriptEngine::stop(RunId id)
+{
+    if (const Run* active = m_active.value(id))
+        active->runner->requestStop(QStringLiteral("cancelled"));
+}
+
+void ScriptEngine::stopAll()
+{
+    for (const Run* active : std::as_const(m_active))
+        active->runner->requestStop(QStringLiteral("cancelled"));
+}
+
+ScriptEngine::Run* ScriptEngine::debugRun() const
+{
+    for (Run* active : m_active) {
+        if (active->debug)
+            return active;
+    }
+    return nullptr;
+}
+
+QString ScriptEngine::unavailableReason(bool debug) const
+{
+    if (m_limits.maxConcurrentRuns > 0 && m_active.size() >= m_limits.maxConcurrentRuns)
+        return QStringLiteral("the limit of %1 scripts running at once is reached; wait for one to finish")
+            .arg(m_limits.maxConcurrentRuns);
+    if (debug && debugRun())
+        return QStringLiteral("another script runs in the debugger; stop it first");
+    return QString();
 }
 
 void ScriptEngine::stepStatement()
 {
-    if (!m_shared)
+    const Run* active = debugRun();
+    if (!active)
         return;
-    QMutexLocker lock(&m_shared->mutex);
-    m_shared->resume = 3;
-    m_shared->wake.wakeAll();
+    QMutexLocker lock(&active->shared->mutex);
+    active->shared->resume = 3;
+    active->shared->wake.wakeAll();
 }
 
 void ScriptEngine::stepRun()
 {
-    if (!m_shared)
+    const Run* active = debugRun();
+    if (!active)
         return;
-    QMutexLocker lock(&m_shared->mutex);
-    m_shared->resume = 1;
-    m_shared->wake.wakeAll();
+    QMutexLocker lock(&active->shared->mutex);
+    active->shared->resume = 1;
+    active->shared->wake.wakeAll();
 }
 
 void ScriptEngine::continueRun()
 {
-    if (!m_shared)
+    const Run* active = debugRun();
+    if (!active)
         return;
-    QMutexLocker lock(&m_shared->mutex);
-    m_shared->resume = 2;
-    m_shared->wake.wakeAll();
+    QMutexLocker lock(&active->shared->mutex);
+    active->shared->resume = 2;
+    active->shared->wake.wakeAll();
 }
 
 void ScriptEngine::setBreakpoints(const QSet<int>& lines)
 {
-    if (!m_shared)
+    const Run* active = debugRun();
+    if (!active)
         return;
-    QMutexLocker lock(&m_shared->mutex);
-    m_shared->breakpoints = lines;
+    QMutexLocker lock(&active->shared->mutex);
+    active->shared->breakpoints = lines;
 }
 
 void ScriptEngine::clearRuns()
@@ -689,28 +780,30 @@ void ScriptEngine::clearRuns()
     emit runsChanged();
 }
 
-bool ScriptEngine::run(const QString& code, const RunOptions& options, RunCallback done)
+ScriptEngine::RunId ScriptEngine::run(const QString& code, const RunOptions& options, RunCallback done)
 {
-    auto refuse = [&done](const QString& message) {
+    const QString unavailable = unavailableReason(options.debug);
+    if (!unavailable.isEmpty()) {
         if (done)
-            done(scriptError(QStringLiteral("unavailable"), message));
-        return false;
-    };
-    if (isRunning())
-        return refuse(QStringLiteral("another script is running; wait for it to finish"));
+            done(scriptError(QStringLiteral("unavailable"), unavailable));
+        return 0;
+    }
 
     ScriptRunConfig config;
     config.code = code;
     config.argsJson = compactJson(options.args);
-    config.maxCalls = m_limits.maxCalls;
+    config.maxCalls = options.maxCalls < 0 ? m_limits.maxCalls : options.maxCalls;
     config.maxLogLines = m_limits.maxLogLines;
     config.dryRun = options.dryRun;
     config.debug = options.debug;
     config.statements = options.debug && options.statements;
     config.readOnlyOnly = options.readOnlyOnly;
 
+    const RunId id = ++m_lastRunId;
+    Run* active = new Run;
+    active->debug = options.debug;
+
     // The methods as they are now; what changes during the run does not reach it.
-    m_runEntries.clear();
     const QList<Entry>& all = m_registered;
     for (const Entry& entry : all) {
         if (!policy(m_methodEnabled, m_groupEnabled, entry.method, true))
@@ -723,110 +816,106 @@ bool ScriptEngine::run(const QString& code, const RunOptions& options, RunCallba
         if (!entry.method.returnExample().isUndefined())
             info.exampleJson = compactJson(entry.method.returnExample());
         config.methods.append(info);
-        m_runEntries.insert(info.name, entry);
+        active->entries.insert(info.name, entry);
     }
 
-    m_shared = QSharedPointer<ScriptRunShared>::create();
-    m_shared->stepMode = !(options.debug && options.stepFromStart) ? ScriptRunShared::RunOn
-                         : options.statements ? ScriptRunShared::ToStatement
-                                              : ScriptRunShared::ToCall;
-    m_shared->breakpoints = options.breakpoints;
-    m_runCallback = std::move(done);
-    m_runRecord = RunRecord();
-    m_runRecord.started = QDateTime::currentDateTime();
-    m_runRecord.name = options.name;
-    m_runRecord.code = code;
-    m_runRecord.args = options.args;
-    m_runRecord.dryRun = options.dryRun;
-    m_runRecord.external = options.external;
+    active->shared = QSharedPointer<ScriptRunShared>::create();
+    active->shared->stepMode = !(options.debug && options.stepFromStart) ? ScriptRunShared::RunOn
+                               : options.statements ? ScriptRunShared::ToStatement
+                                                    : ScriptRunShared::ToCall;
+    active->shared->breakpoints = options.breakpoints;
+    active->callback = std::move(done);
+    active->record.id = id;
+    active->record.started = QDateTime::currentDateTime();
+    active->record.name = options.name;
+    active->record.code = code;
+    active->record.args = options.args;
+    active->record.dryRun = options.dryRun;
+    active->record.external = options.external;
 
-    ScriptRunner* runner = new ScriptRunner(config, m_shared, this);
-    m_runner = runner;
+    ScriptRunner* runner = new ScriptRunner(config, active->shared, this);
+    active->runner = runner;
+    m_active.insert(id, active);
     // The runner object lives on this thread and signals from its own, so
-    // these arrive queued. A late signal of an earlier run is ignored.
+    // these arrive queued - all of them before `completed`.
     connect(runner, &ScriptRunner::callRequested, this,
-            [this, runner](quint64 id, const QString& name, const QString& argsJson) {
-        if (runner == m_runner)
-            onCallRequested(id, name, argsJson);
+            [this, id](quint64 call, const QString& name, const QString& argsJson) {
+        onCallRequested(id, call, name, argsJson);
     });
     connect(runner, &ScriptRunner::paused, this,
-            [this, runner](int line, const QString& name, const QString& argsJson, const QString& variablesJson) {
-        if (runner == m_runner)
-            emit runPaused(line, name, QJsonDocument::fromJson(argsJson.toUtf8()).array(),
-                           QJsonDocument::fromJson(variablesJson.toUtf8()).object());
+            [this, id](int line, const QString& name, const QString& argsJson, const QString& variablesJson) {
+        emit runPaused(id, line, name, QJsonDocument::fromJson(argsJson.toUtf8()).array(),
+                       QJsonDocument::fromJson(variablesJson.toUtf8()).object());
     });
     connect(runner, &ScriptRunner::callReturned, this,
-            [this, runner](int line, const QString& name, const QString& argsJson, const QString& payloadJson) {
-        if (runner != m_runner)
-            return;
+            [this, id](int line, const QString& name, const QString& argsJson, const QString& payloadJson) {
         const QJsonObject payload = QJsonDocument::fromJson(payloadJson.toUtf8()).object();
-        emit runCallFinished(line, name, QJsonDocument::fromJson(argsJson.toUtf8()).array(),
+        emit runCallFinished(id, line, name, QJsonDocument::fromJson(argsJson.toUtf8()).array(),
                              payload.value("v"), payload.value("e").toString());
     });
-    connect(runner, &ScriptRunner::logged, this, [this, runner](const QString& text) {
-        if (runner == m_runner)
-            emit runLog(text);
+    connect(runner, &ScriptRunner::logged, this, [this, id](const QString& text) {
+        emit runLog(id, text);
     });
     connect(runner, &ScriptRunner::progressed, this,
-            [this, runner](double doneCount, double total, const QString& text) {
-        if (runner != m_runner)
-            return;
-        emit runProgress(doneCount, total, text);
+            [this, id](double doneCount, double total, const QString& text) {
+        emit runProgress(id, doneCount, total, text);
     });
-    connect(runner, &ScriptRunner::completed, this, [this, runner](const QJsonObject& result) {
-        if (runner == m_runner)
-            onRunCompleted(result);
+    connect(runner, &ScriptRunner::completed, this, [this, id](const QJsonObject& result) {
+        onRunCompleted(id, result);
     });
 
-    // A paused script is waiting for the user, not running away.
-    if (!options.debug && m_limits.timeoutMs > 0)
-        m_timeout->start(m_limits.timeoutMs);
-    emit runStarted(options.name, options.external);
+    // A paused script is waiting for the user, not running away. The timer
+    // goes with the runner.
+    const int timeoutMs = options.timeoutMs < 0 ? m_limits.timeoutMs : options.timeoutMs;
+    if (!options.debug && timeoutMs > 0)
+        QTimer::singleShot(timeoutMs, runner, [runner]() { runner->requestStop(QStringLiteral("timeout")); });
+    emit runStarted(id, options.name, options.external);
     runner->start();
-    return true;
+    return id;
 }
 
-void ScriptEngine::onRunCompleted(const QJsonObject& result)
+void ScriptEngine::onRunCompleted(RunId id, const QJsonObject& result)
 {
-    ScriptRunner* runner = m_runner;
-    m_runner = nullptr;
-    m_timeout->stop();
-    runner->wait();
-    runner->deleteLater();
-    m_shared.reset();
-    m_runEntries.clear();
+    Run* active = m_active.take(id);
+    if (!active)
+        return;
+    active->runner->wait();
+    active->runner->deleteLater();
 
-    m_runRecord.result = result;
-    m_runs.append(m_runRecord);
+    active->record.result = result;
+    m_runs.append(active->record);
     while (m_runs.size() > kMaxRuns)
         m_runs.removeFirst();
 
     // The callback may start the next script.
-    const RunCallback callback = std::move(m_runCallback);
-    m_runCallback = nullptr;
+    const RunCallback callback = std::move(active->callback);
+    delete active;
     emit runsChanged();
-    emit runFinished(result);
+    emit runFinished(id, result);
     if (callback)
         callback(result);
 }
 
-void ScriptEngine::onCallRequested(quint64 id, const QString& name, const QString& argsJson)
+void ScriptEngine::onCallRequested(RunId id, quint64 call, const QString& name, const QString& argsJson)
 {
+    const Run* active = m_active.value(id);
+    if (!active)
+        return;
     // Hands the answer to the waiting script. Holds the shared state, not
     // this object: an asynchronous method may answer from any thread, and
     // after this object is gone.
-    const QSharedPointer<ScriptRunShared> shared = m_shared;
-    auto deliver = [shared, id](const QString& payload) {
+    const QSharedPointer<ScriptRunShared> shared = active->shared;
+    auto deliver = [shared, call](const QString& payload) {
         QMutexLocker lock(&shared->mutex);
-        if (shared->pendingId != id || shared->resultReady)
+        if (shared->pendingId != call || shared->resultReady)
             return;     // the script is not waiting for this any more
         shared->result = payload;
         shared->resultReady = true;
         shared->wake.wakeAll();
     };
 
-    const auto it = m_runEntries.constFind(name);
-    if (it == m_runEntries.cend()) {
+    const auto it = active->entries.constFind(name);
+    if (it == active->entries.cend()) {
         deliver(errorPayload(QStringLiteral("no method '%1'").arg(name)));
         return;
     }
@@ -948,7 +1037,8 @@ void ScriptEngine::askApproval(const ApprovalRequest& request,
     layout->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(testButton, &QPushButton::clicked, &dialog, [this, request, output, testButton, runButton]() {
+    RunId testRun = 0;
+    connect(testButton, &QPushButton::clicked, &dialog, [this, request, output, testButton, runButton, &testRun]() {
         RunOptions options;
         options.name = request.name;
         options.args = request.args;
@@ -957,7 +1047,7 @@ void ScriptEngine::askApproval(const ApprovalRequest& request,
         runButton->setEnabled(false);
         QPointer<QPlainTextEdit> out(output);
         QPointer<QPushButton> test(testButton), runAgain(runButton);
-        run(request.code, options, [out, test, runAgain](const QJsonObject& result) {
+        testRun = run(request.code, options, [out, test, runAgain](const QJsonObject& result) {
             if (!out)
                 return;
             out->setPlainText(QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented)));
@@ -973,10 +1063,12 @@ void ScriptEngine::askApproval(const ApprovalRequest& request,
     decision.rememberForSession = decision.approved && remember->isChecked();
     // A test run still going when the dialog closes must not block the real
     // one: it is stopped, and the decision takes effect once it has ended.
-    if (isRunning()) {
-        stop();
+    if (isRunning(testRun)) {
+        stop(testRun);
         auto* once = new QObject(this);
-        connect(this, &ScriptEngine::runFinished, once, [once, decide, decision]() {
+        connect(this, &ScriptEngine::runFinished, once, [once, testRun, decide, decision](RunId id) {
+            if (id != testRun)
+                return;
             once->deleteLater();
             decide(decision);
         });
@@ -1069,9 +1161,9 @@ void ScriptEngine::requestRun(const Request& request, RunCallback done, std::fun
         finish(scriptError(QStringLiteral("check"), QStringLiteral("there is no script to run")));
         return;
     }
-    if (isRunning()) {
-        finish(scriptError(QStringLiteral("unavailable"),
-                           QStringLiteral("another script is running; wait for it to finish")));
+    const QString unavailable = unavailableReason(false);
+    if (!unavailable.isEmpty()) {
+        finish(scriptError(QStringLiteral("unavailable"), unavailable));
         return;
     }
 

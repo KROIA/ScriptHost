@@ -6,6 +6,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QList>
+#include <QMap>
 #include <QObject>
 #include <QPointer>
 #include <QSet>
@@ -14,15 +15,12 @@
 #include <QStringList>
 #include <functional>
 
-class QTimer;
 class QWidget;
 
 namespace ScriptHost
 {
 
 class ScriptLibrary;
-class ScriptRunner;
-struct ScriptRunShared;
 
 // Runs JavaScript inside an application, against an interface the
 // application defines.
@@ -42,7 +40,8 @@ struct ScriptRunShared;
 //
 // A script runs on a thread of its own; method handlers run on the thread of
 // this object (the GUI thread), so they may touch widgets and application
-// data, and the application stays responsive while a script works.
+// data, and the application stays responsive while a script works. Several
+// scripts run at the same time, each told apart by its RunId.
 //
 // Two ways to start a script:
 //   run()         the application itself, or the user in the script editor.
@@ -110,9 +109,11 @@ public:
     // ---- Limits -----------------------------------------------------------
     struct Limits
     {
-        int timeoutMs   = 300000;   // whole run; not applied in the debugger
-        int maxCalls    = 5000;     // method calls per run
-        int maxLogLines = 200;      // kept of the script log
+        int timeoutMs         = 300000; // whole run, timers included; not applied
+                                        // in the debugger; 0 = no limit
+        int maxCalls          = 5000;   // method calls per run; 0 = no limit
+        int maxLogLines       = 200;    // the latest lines kept of the script log
+        int maxConcurrentRuns = 8;      // runs at the same time; 0 = no limit
     };
     void setLimits(const Limits& limits);
     Limits limits() const { return m_limits; }
@@ -219,18 +220,36 @@ public:
                                         // statement
         bool        external = false;   // for the record: started through requestRun()
         bool        readOnlyOnly = false;    // a changing method fails the script
+        int         timeoutMs = -1;     // -1 = Limits::timeoutMs, 0 = no limit
+        int         maxCalls = -1;      // -1 = Limits::maxCalls, 0 = no limit
     };
+    // Names one run of this object; 0 is none.
+    using RunId = quint64;
     using RunCallback = std::function<void(const QJsonObject& result)>;
-    // Starts a script. One runs at a time: returns false, with the callback
-    // called with the error, when one is running. The result:
+    // Starts a script. Several run at the same time, up to
+    // Limits::maxConcurrentRuns, and at most one of them in the debugger
+    // (RunOptions::debug). Returns the new run's id; 0 when it cannot start,
+    // with the callback called with {"phase":"unavailable"}. The result:
     //   {"status":"ok","result":...,"calls":{...},"duration_ms":N,"log":[...]}
     //   {"status":"error","phase":"syntax"|"runtime"|"limit"|"cancelled"|
     //    "approval"|"unavailable","line":N,"message":"..."}
-    bool run(const QString& code, const RunOptions& options = RunOptions(), RunCallback done = nullptr);
+    // A script that set timers (setTimeout, setInterval) goes on running
+    // after its body returned, until no timer is left, it is stopped or it
+    // reaches its time limit. `result` is what the body returned,
+    // `duration_ms` the whole time; an exception thrown in a timer's function
+    // ends the run as a "runtime" error.
+    RunId run(const QString& code, const RunOptions& options = RunOptions(), RunCallback done = nullptr);
+    // Is any run active?
     bool isRunning() const;
-    // True while the script running was started through requestRun().
-    bool isExternalRun() const;
-    void stop();
+    bool isRunning(RunId id) const;
+    // The active runs, oldest first.
+    QList<RunId> activeRuns() const;
+    // True while the run is active and was started through requestRun().
+    bool isExternalRun(RunId id) const;
+    // Ends the run soon - also while it sleeps, waits for a timer or for a
+    // method, or loops in JavaScript. Its result is {"phase":"cancelled"}.
+    void stop(RunId id);
+    void stopAll();
 
     struct Request
     {
@@ -245,14 +264,16 @@ public:
     // ({"phase":"declined","reason":...} when not), then run. `done`
     // always gets a result. `abandoned`, if given, is asked once the user has
     // decided: true means nobody is waiting for this run any more, and it is
-    // dropped without a result.
+    // dropped without a result. The run has the engine's Limits: a request
+    // cannot choose others, as it comes from outside the application.
     void requestRun(const Request& request, RunCallback done,
                     std::function<bool()> abandoned = nullptr);
 
-    // Debugger, while a run is paused (runPaused): one statement further
-    // (a run with RunOptions::statements; a script whose statements cannot be
-    // told apart is stepped call by call), one call further, or on to
-    // the next breakpoint.
+    // Debugger, for the run in the debugger (RunOptions::debug) while it is
+    // paused (runPaused): one statement further (a run with
+    // RunOptions::statements; a script whose statements cannot be told apart
+    // is stepped call by call), one call further, or on to the next
+    // breakpoint. Nothing happens without a run in the debugger.
     void stepStatement();
     void stepRun();
     void continueRun();
@@ -261,6 +282,7 @@ public:
     // The runs of this session, oldest first.
     struct RunRecord
     {
+        RunId       id = 0;
         QDateTime   started;
         QString     name;
         QString     code;
@@ -271,6 +293,9 @@ public:
     };
     QList<RunRecord> runs() const { return m_runs; }
     void clearRuns();
+    // The record of an active run so far, without a result yet; an empty one
+    // (id 0) when the run is not active.
+    RunRecord activeRun(RunId id) const;
 
     // ---- Saved scripts ----------------------------------------------------
     // Where requestRun() finds scripts by name and where ScriptsWidget lists
@@ -291,19 +316,21 @@ signals:
     // What needs approval, the library or one of the locks changed.
     void settingsChanged();
 
-    void runStarted(const QString& name, bool external);
+    // The run* signals name the run they are about first.
+    void runStarted(RunId id, const QString& name, bool external);
     // Debugger: stopped in `line` - before `method` is called, or before the
     // statement there (`method` empty). `variables` are those visible at that
     // statement, each as the text a debugger shows: {"n": "3", "id": "\"o1\""}.
     // Empty in a run without RunOptions::statements.
-    void runPaused(int line, const QString& method, const QJsonArray& arguments,
+    void runPaused(RunId id, int line, const QString& method, const QJsonArray& arguments,
                    const QJsonObject& variables);
     // Debugger: the call returned `value`, or failed with `error`.
-    void runCallFinished(int line, const QString& method, const QJsonArray& arguments,
+    void runCallFinished(RunId id, int line, const QString& method, const QJsonArray& arguments,
                          const QJsonValue& value, const QString& error);
-    void runLog(const QString& text);
-    void runProgress(double done, double total, const QString& text);
-    void runFinished(const QJsonObject& result);
+    void runLog(RunId id, const QString& text);
+    void runProgress(RunId id, double done, double total, const QString& text);
+    void runFinished(RunId id, const QJsonObject& result);
+    // runs() changed.
     void runsChanged();
 
 private:
@@ -314,14 +341,18 @@ private:
         AsyncScriptMethodHandler asyncHandler;
         bool                     local = false; // handled inside the runner
     };
+    struct Run;     // one run in progress
 
     void registerBuiltins();
     bool policy(const QHash<QString, bool>& byName, const QHash<QString, bool>& byGroup,
                 const ScriptMethod& method, bool fallback) const;
     const Entry* findEntry(const QString& name) const;
     void askApproval(const ApprovalRequest& request, std::function<void(const ApprovalDecision&)> decide);
-    void onCallRequested(quint64 id, const QString& name, const QString& argsJson);
-    void onRunCompleted(const QJsonObject& result);
+    // Why no further run can start now; empty when one can.
+    QString unavailableReason(bool debug) const;
+    Run* debugRun() const;
+    void onCallRequested(RunId id, quint64 call, const QString& name, const QString& argsJson);
+    void onRunCompleted(RunId id, const QJsonObject& result);
 
     QList<Entry>         m_registered;
     QHash<QString, bool> m_methodEnabled, m_groupEnabled;
@@ -341,14 +372,9 @@ private:
     bool        m_debuggerEnabled = true;
     QPointer<ScriptLibrary> m_library;
 
-    // The run in progress.
-    ScriptRunner*                   m_runner = nullptr;
-    QSharedPointer<ScriptRunShared> m_shared;
-    QHash<QString, Entry>           m_runEntries;
-    RunCallback                     m_runCallback;
-    RunRecord                       m_runRecord;
-    QTimer*                         m_timeout = nullptr;
-    QList<RunRecord>                m_runs;
+    QMap<RunId, Run*>   m_active;           // the runs in progress, owned
+    RunId               m_lastRunId = 0;
+    QList<RunRecord>    m_runs;
 };
 
 } // namespace ScriptHost

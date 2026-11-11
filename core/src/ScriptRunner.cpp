@@ -36,6 +36,16 @@ const char* const kPrelude = R"JS((function(native){
             };
         },
         step: function(line, read){ native.step(line, read); },
+        // timer(repeat): setTimeout / setInterval. The runner calls the
+        // function it gets with the further arguments bound.
+        timer: function(repeat){
+            return function(fn, ms){
+                if (typeof fn !== 'function') throw new TypeError('the first argument must be a function');
+                var a = Array.prototype.slice.call(arguments, 2);
+                return native.timer(function(){ return fn.apply(undefined, a); }, Number(ms) || 0, repeat);
+            };
+        },
+        clear: function(id){ native.clearTimer(Number(id) || 0); },
         // The variables a statement's reader gives, as {"name": "value as text"}.
         vars: function(read){
             var text = function(v){
@@ -142,8 +152,7 @@ bool ScriptRunner::stopRequested(QString* reason) const
 
 void ScriptRunner::run()
 {
-    QElapsedTimer timer;
-    timer.start();
+    m_clock.start();
     QJsonObject result;
     {
         QJSEngine engine;
@@ -157,6 +166,7 @@ void ScriptRunner::run()
         result = execute(engine);
         m_stepScope = QJSValue();       // these belong to the engine that ends here
         m_formatVariables = QJSValue();
+        m_timers.clear();
         QMutexLocker lock(&m_engineMutex);
         m_engine = nullptr;
     }
@@ -189,7 +199,7 @@ void ScriptRunner::run()
             if (m_logLines > tail.size())
                 result["log_lines"] = m_logLines;
         }
-        result["duration_ms"] = timer.elapsed();
+        result["duration_ms"] = m_clock.elapsed();
     }
     m_result = result;
     emit completed(result);
@@ -248,6 +258,8 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
     const QJSValue prelude = engine.evaluate(QLatin1String(kPrelude), QStringLiteral("prelude"))
                                  .call({native});
     QJSValue make = prelude.property(QStringLiteral("make"));
+    QJSValue timer = prelude.property(QStringLiteral("timer"));
+    const QJSValue clear = prelude.property(QStringLiteral("clear"));
     QJSValue runFunction = prelude.property(QStringLiteral("run"));
     QJSValue global = engine.globalObject();
     if (m_instrumented) {
@@ -255,7 +267,17 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         m_formatVariables = prelude.property(QStringLiteral("vars"));
     }
     for (const ScriptMethodInfo& method : m_config.methods) {
-        const QJSValue callable = make.call({method.name, m_config.debug});
+        // The timers take a function, so they are JavaScript of their own.
+        // A method the application registered under such a name is its own.
+        const bool repeat = method.local && method.name == QLatin1String("setInterval");
+        QJSValue callable;
+        if (repeat || (method.local && method.name == QLatin1String("setTimeout")))
+            callable = timer.call({repeat});
+        else if (method.local && (method.name == QLatin1String("clearTimeout")
+                                  || method.name == QLatin1String("clearInterval")))
+            callable = clear;
+        else
+            callable = make.call({method.name, m_config.debug});
         const int dot = method.name.indexOf(QLatin1Char('.'));
         if (dot < 0) {
             global.setProperty(method.name, callable);
@@ -270,7 +292,48 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         object.setProperty(method.name.mid(dot + 1), callable);
     }
 
-    const QJSValue outcome = runFunction.call({function, m_config.argsJson});
+    QJsonObject payload;
+    const QJsonObject failed = failure(runFunction.call({function, m_config.argsJson}), payload);
+    if (!failed.isEmpty())
+        return failed;
+    QJsonObject result{{"status", "ok"}, {"result", payload.value(QStringLiteral("v"))}};
+    if (payload.value(QStringLiteral("u")).toBool() && !m_config.dryRun)
+        result["note"] = "the script returned nothing; use `return` to hand back a value";
+
+    // The timers keep the run alive. Waited for like sleep(), so that a stop
+    // wakes the wait at once.
+    // ponytail: the next timer is found by a scan of all of them; a heap
+    // when scripts keep thousands of timers.
+    while (!m_timers.isEmpty()) {
+        auto next = m_timers.begin();
+        for (auto it = m_timers.begin(); it != m_timers.end(); ++it) {
+            if (it.value().due < next.value().due)
+                next = it;
+        }
+        {
+            QDeadlineTimer deadline(qMax(qint64(0), next.value().due - m_clock.elapsed()));
+            QMutexLocker lock(&m_shared->mutex);
+            while (!m_shared->stop && !deadline.hasExpired())
+                m_shared->wake.wait(&m_shared->mutex, deadline);
+        }
+        if (stopRequested(&reason))
+            return stoppedResult(reason);
+        // Due again before it runs, so that the function may clear its own timer.
+        const QJSValue fn = next.value().fn;
+        if (next.value().interval > 0)
+            next.value().due = m_clock.elapsed() + next.value().interval;
+        else
+            m_timers.erase(next);
+        const QJsonObject failedTimer = failure(runFunction.call({fn, QStringLiteral("null")}), payload);
+        if (!failedTimer.isEmpty())
+            return failedTimer;
+    }
+    return result;
+}
+
+QJsonObject ScriptRunner::failure(const QJSValue& outcome, QJsonObject& payload) const
+{
+    QString reason;
     if (stopRequested(&reason) && (outcome.isError() || !outcome.isString()))
         return stoppedResult(reason);
     if (outcome.isError() || !outcome.isString()) {
@@ -278,28 +341,42 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
                 {"message", outcome.toString()}};
     }
 
-    const QJsonObject payload = QJsonDocument::fromJson(outcome.toString().toUtf8()).object();
-    if (payload.contains(QStringLiteral("e"))) {
-        // A stop makes the pending call fail; that failure is not the news.
-        if (stopRequested(&reason))
-            return stoppedResult(reason);
-        QString message = payload.value(QStringLiteral("e")).toString();
-        const QString name = payload.value(QStringLiteral("n")).toString();
-        if (!name.isEmpty() && name != QLatin1String("Error"))
-            message = name + QStringLiteral(": ") + message;
-        QJsonObject result{{"status", "error"}, {"phase", "runtime"}, {"message", message}};
-        const QList<int> lines = scriptLines(payload.value(QStringLiteral("s")).toString());
-        if (!lines.isEmpty())
-            result["line"] = lines.first();
-        if (name == QLatin1String("ReferenceError"))
-            result["hint"] = "only the methods of the application's script interface exist";
-        return result;
-    }
-
-    QJsonObject result{{"status", "ok"}, {"result", payload.value(QStringLiteral("v"))}};
-    if (payload.value(QStringLiteral("u")).toBool() && !m_config.dryRun)
-        result["note"] = "the script returned nothing; use `return` to hand back a value";
+    payload = QJsonDocument::fromJson(outcome.toString().toUtf8()).object();
+    if (!payload.contains(QStringLiteral("e")))
+        return QJsonObject();
+    // A stop makes the pending call fail; that failure is not the news.
+    if (stopRequested(&reason))
+        return stoppedResult(reason);
+    QString message = payload.value(QStringLiteral("e")).toString();
+    const QString name = payload.value(QStringLiteral("n")).toString();
+    if (!name.isEmpty() && name != QLatin1String("Error"))
+        message = name + QStringLiteral(": ") + message;
+    QJsonObject result{{"status", "error"}, {"phase", "runtime"}, {"message", message}};
+    const QList<int> lines = scriptLines(payload.value(QStringLiteral("s")).toString());
+    if (!lines.isEmpty())
+        result["line"] = lines.first();
+    if (name == QLatin1String("ReferenceError"))
+        result["hint"] = "only the methods of the application's script interface exist";
     return result;
+}
+
+double ScriptRunner::addTimer(const QJSValue& fn, double ms, bool repeat)
+{
+    // An interval of at least a millisecond, so that it cannot spin.
+    const qint64 wait = qint64(qBound(repeat ? 1.0 : 0.0, ms, 2147483647.0));
+    Timer timer;
+    timer.fn = fn;
+    timer.due = m_clock.elapsed() + wait;
+    timer.interval = repeat ? wait : 0;
+    m_timers.insert(++m_lastTimerId, timer);
+    return double(m_lastTimerId);
+}
+
+void ScriptRunner::clearTimer(double id)
+{
+    // Whatever number the script passes; only an id it was given counts.
+    if (id >= 1 && id <= double(m_lastTimerId))
+        m_timers.remove(qint64(id));
 }
 
 bool ScriptRunner::waitWhilePaused(int line, const QString& name, const QString& argsJson)
@@ -412,7 +489,7 @@ QString ScriptRunner::handleCall(const QString& name, const QString& argsJson, c
         return exceed(QStringLiteral("approval"),
                       QStringLiteral("'%1' changes something, and the script ran without the approval that needs").arg(name));
     }
-    if (++m_callCount > m_config.maxCalls) {
+    if (m_config.maxCalls > 0 && ++m_callCount > m_config.maxCalls) {
         return exceed(QStringLiteral("limit"),
                       QStringLiteral("stopped after %1 method calls (the limit)").arg(m_config.maxCalls));
     }

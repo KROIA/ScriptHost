@@ -320,7 +320,7 @@ ScriptEditorDialog::ScriptEditorDialog(ScriptEngine* scripting, QWidget* parent)
     m_code = new ScriptCodeEdit(rows);
     m_code->setObjectName(QStringLiteral("scripthost_scriptEditorCode"));
     m_code->breakpointsChanged = [this]() {
-        if (m_ownRun && m_scripting)
+        if (m_ownRun && m_ownDebug && m_scripting)
             m_scripting->setBreakpoints(m_code->breakpoints());
     };
 
@@ -471,8 +471,8 @@ ScriptEditorDialog::ScriptEditorDialog(ScriptEngine* scripting, QWidget* parent)
     if (m_scripting) {
         connect(m_scripting, &ScriptEngine::runPaused, this, &ScriptEditorDialog::onPaused);
         connect(m_scripting, &ScriptEngine::runCallFinished, this, &ScriptEditorDialog::onCallFinished);
-        connect(m_scripting, &ScriptEngine::runLog, this, [this](const QString& text) {
-            if (m_ownRun)
+        connect(m_scripting, &ScriptEngine::runLog, this, [this](ScriptEngine::RunId run, const QString& text) {
+            if (run == m_ownRun)
                 m_output->appendPlainText(text);
         });
         connect(m_scripting, &ScriptEngine::runStarted, this, &ScriptEditorDialog::updateButtons);
@@ -487,7 +487,7 @@ ScriptEditorDialog::ScriptEditorDialog(ScriptEngine* scripting, QWidget* parent)
 ScriptEditorDialog::~ScriptEditorDialog()
 {
     if (m_ownRun && m_scripting)
-        m_scripting->stop();
+        m_scripting->stop(m_ownRun);
 }
 
 void ScriptEditorDialog::setScript(const ScriptLibrary::Script& script)
@@ -622,7 +622,7 @@ bool ScriptEditorDialog::debugScript()
 
 bool ScriptEditorDialog::startRun(bool dryRun, bool debug)
 {
-    if (!m_scripting || m_scripting->isRunning())
+    if (!m_scripting || m_ownRun)
         return false;
     ScriptEngine::RunOptions options;
     if (!parseArgs(options.args))
@@ -645,16 +645,16 @@ bool ScriptEditorDialog::startRun(bool dryRun, bool debug)
     m_outputTabs->setCurrentWidget(debug ? static_cast<QWidget*>(m_calls) : m_output);
     showStatus(debug ? tr("Debugging...") : dryRun ? tr("Dry run...") : tr("Running..."), false);
 
-    m_ownRun = true;
     // The callback may come after the window is gone (closing stops the run,
     // the result arrives later).
     QPointer<ScriptEditorDialog> self(this);
-    const bool started = m_scripting->run(m_code->toPlainText(), options, [self](const QJsonObject& result) {
+    m_ownDebug = debug;
+    m_ownRun = m_scripting->run(m_code->toPlainText(), options, [self](const QJsonObject& result) {
         if (self)
             self->onOwnRunFinished(result);
     });
     updateButtons();
-    return started;
+    return m_ownRun != 0;
 }
 
 void ScriptEditorDialog::showVariables(const QJsonObject& variables)
@@ -682,10 +682,10 @@ void ScriptEditorDialog::showVariables(const QJsonObject& variables)
     }
 }
 
-void ScriptEditorDialog::onPaused(int line, const QString& method, const QJsonArray& arguments,
+void ScriptEditorDialog::onPaused(quint64 run, int line, const QString& method, const QJsonArray& arguments,
                                   const QJsonObject& variables)
 {
-    if (!m_ownRun)
+    if (run != m_ownRun)
         return;
     settlePendingCall();
     m_paused = true;
@@ -723,10 +723,10 @@ void ScriptEditorDialog::settlePendingCall()
     call->setText(call->data(Qt::UserRole).toString());
 }
 
-void ScriptEditorDialog::onCallFinished(int line, const QString& method, const QJsonArray& arguments,
+void ScriptEditorDialog::onCallFinished(quint64 run, int line, const QString& method, const QJsonArray& arguments,
                                         const QJsonValue& value, const QString& error)
 {
-    if (!m_ownRun)
+    if (run != m_ownRun)
         return;
     const QString text = callText(method, arguments);
     int row = -1;
@@ -791,12 +791,12 @@ void ScriptEditorDialog::continueRun()
 void ScriptEditorDialog::stopRun()
 {
     if (m_ownRun && m_scripting)
-        m_scripting->stop();
+        m_scripting->stop(m_ownRun);
 }
 
 void ScriptEditorDialog::onOwnRunFinished(const QJsonObject& result)
 {
-    m_ownRun = false;
+    m_ownRun = 0;
     m_paused = false;
     m_pausedLine = 0;
     settlePendingCall();
@@ -826,7 +826,7 @@ void ScriptEditorDialog::onOwnRunFinished(const QJsonObject& result)
 void ScriptEditorDialog::updateButtons()
 {
     const bool available = m_scripting != nullptr;
-    const bool running = available && m_scripting->isRunning();
+    const bool running = available && m_ownRun;
     const bool debugger = available && m_scripting->isDebuggerEnabled();
     m_check->setEnabled(available);
     m_run->setEnabled(available && !running);
@@ -840,7 +840,7 @@ void ScriptEditorDialog::updateButtons()
     m_step->setEnabled(m_ownRun && m_paused);
     m_stepCall->setEnabled(m_ownRun && m_paused);
     m_continue->setEnabled(m_ownRun && m_paused);
-    m_stop->setEnabled(m_ownRun && running);
+    m_stop->setEnabled(running);
     m_save->setEnabled(!m_readOnly && m_scripting && m_scripting->userMayEditScripts() && m_scripting->library());
 }
 

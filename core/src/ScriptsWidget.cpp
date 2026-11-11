@@ -23,6 +23,7 @@
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <map>
@@ -186,11 +187,17 @@ ScriptsWidget::ScriptsWidget(QWidget* parent)
     scroll->setWidget(m_methodsPage);
     tabs->addTab(scroll, tr("Methods"));
 
-    // ---- runs of this session
+    // ---- runs going on now and runs of this session
     auto* runsPage = new QWidget(tabs);
     auto* runsLayout = new QVBoxLayout(runsPage);
     auto* split = new QSplitter(Qt::Vertical, runsPage);
     split->setChildrenCollapsible(false);
+    m_activeRuns = makeTable({tr("Running script"), tr("By"), tr("Started"), tr("Running for"), QString()},
+                             "scripthost_scriptsActiveRuns", 0, split);
+    m_activeRuns->setSelectionMode(QAbstractItemView::NoSelection);
+    m_tick = new QTimer(this);
+    m_tick->setInterval(1000);
+    connect(m_tick, &QTimer::timeout, this, &ScriptsWidget::updateElapsed);
     m_runs = makeTable({tr("Time"), tr("Script"), tr("By"), tr("Dry run"), tr("Status"), tr("Duration")},
                        "scripthost_scriptsRuns", 1, split);
     m_runDetails = new QPlainTextEdit(split);
@@ -198,6 +205,7 @@ ScriptsWidget::ScriptsWidget(QWidget* parent)
     m_runDetails->setReadOnly(true);
     m_runDetails->setLineWrapMode(QPlainTextEdit::NoWrap);
     m_runDetails->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    split->addWidget(m_activeRuns);
     split->addWidget(m_runs);
     split->addWidget(m_runDetails);
     runsLayout->addWidget(split, 1);
@@ -240,6 +248,8 @@ void ScriptsWidget::setScripting(ScriptEngine* scripting)
         });
         connect(m_scripting, &ScriptEngine::methodsChanged, this, &ScriptsWidget::refreshMethods);
         connect(m_scripting, &ScriptEngine::runsChanged, this, &ScriptsWidget::refreshRuns);
+        connect(m_scripting, &ScriptEngine::runStarted, this, &ScriptsWidget::refreshActiveRuns);
+        connect(m_scripting, &ScriptEngine::runFinished, this, &ScriptsWidget::refreshActiveRuns);
     }
     refresh();
 }
@@ -308,6 +318,7 @@ void ScriptsWidget::refresh()
     refreshScripts();
     refreshMethods();
     refreshRuns();
+    refreshActiveRuns();
 }
 
 void ScriptsWidget::refreshSwitches()
@@ -506,6 +517,54 @@ void ScriptsWidget::refreshRuns()
     else
         m_selectedRun = QDateTime();
     showRunDetails();
+}
+
+void ScriptsWidget::refreshActiveRuns()
+{
+    m_activeRuns->setRowCount(0);
+    const QList<ScriptEngine::RunId> ids = m_scripting ? m_scripting->activeRuns() : QList<ScriptEngine::RunId>();
+    for (const ScriptEngine::RunId id : ids) {
+        const ScriptEngine::RunRecord record = m_scripting->activeRun(id);
+        const QStringList cells = {
+            record.name.isEmpty() ? tr("(unnamed)") : record.name,
+            record.external ? tr("requested by %1").arg(m_scripting->requesterName()) : tr("the user"),
+            record.started.toString(QStringLiteral("HH:mm:ss")),
+            QString()
+        };
+        const int row = m_activeRuns->rowCount();
+        m_activeRuns->insertRow(row);
+        for (int column = 0; column < cells.size(); ++column)
+            m_activeRuns->setItem(row, column, new QTableWidgetItem(cells.at(column)));
+        m_activeRuns->item(row, 2)->setData(Qt::UserRole, record.started);
+        // Stops at once; the row goes when the run has finished.
+        auto* stop = new QPushButton(tr("Stop"), m_activeRuns);
+        stop->setObjectName(QStringLiteral("scripthost_scriptsActiveRunStop"));
+        connect(stop, &QPushButton::clicked, this, [this, stop, id]() {
+            stop->setEnabled(false);
+            stop->setText(tr("Stopping..."));
+            if (m_scripting)
+                m_scripting->stop(id);
+        });
+        m_activeRuns->setCellWidget(row, 4, stop);
+    }
+    updateElapsed();
+    if (ids.isEmpty())
+        m_tick->stop();
+    else if (!m_tick->isActive())
+        m_tick->start();
+}
+
+void ScriptsWidget::updateElapsed()
+{
+    const QDateTime now = QDateTime::currentDateTime();
+    for (int row = 0; row < m_activeRuns->rowCount(); ++row) {
+        const QDateTime started = m_activeRuns->item(row, 2)->data(Qt::UserRole).toDateTime();
+        const qint64 seconds = started.isValid() ? qMax<qint64>(0, started.secsTo(now)) : 0;
+        m_activeRuns->item(row, 3)->setText(QStringLiteral("%1:%2:%3")
+                                                .arg(seconds / 3600)
+                                                .arg((seconds / 60) % 60, 2, 10, QLatin1Char('0'))
+                                                .arg(seconds % 60, 2, 10, QLatin1Char('0')));
+    }
 }
 
 void ScriptsWidget::showRunDetails()

@@ -12,6 +12,7 @@ class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QTableWidget;
+class QTimer;
 class QVBoxLayout;
 
 namespace ScriptHost
@@ -22,7 +23,8 @@ class ScriptLibrary;
 
 // Where the user of an application sees and steers scripting: may the
 // program run scripts, must it ask first, which methods may scripts call,
-// the saved scripts (with the editor) and the runs of this session. The
+// the saved scripts (with the editor), the runs going on now - each with a
+// Stop button, which acts at once - and the runs of this session. The
 // "Scripts" tab of a settings dialog can be one of these; an application with a
 // settings window of its own embeds another.
 //
@@ -38,7 +40,8 @@ class ScriptLibrary;
 //   scripthost_scriptsApprovalHint, scripthost_scriptsTabs, scripthost_scriptsTable,
 //   scripthost_scriptsNoLibrary, scripthost_scriptsNew, scripthost_scriptsEdit,
 //   scripthost_scriptsDuplicate, scripthost_scriptsDelete, scripthost_scriptsOpenFolder,
-//   scripthost_scriptsMethod_<method name>, scripthost_scriptsRuns,
+//   scripthost_scriptsMethod_<method name>, scripthost_scriptsActiveRuns,
+//   scripthost_scriptsActiveRunStop (one per active run), scripthost_scriptsRuns,
 //   scripthost_scriptsRunDetails, scripthost_scriptsRunsClear
 class SCRIPT_HOST_API ScriptsWidget : public QWidget
 {
@@ -88,6 +91,8 @@ private:
     void refreshScripts();
     void refreshMethods();
     void refreshRuns();
+    void refreshActiveRuns();
+    void updateElapsed();
     void updateScriptButtons();
     void showRunDetails();
     QString selectedScript() const;
@@ -111,6 +116,8 @@ private:
     QPushButton*    m_openFolder = nullptr;
     QWidget*        m_methodsPage = nullptr;
     QVBoxLayout*    m_methodsLayout = nullptr;
+    QTableWidget*   m_activeRuns = nullptr;
+    QTimer*         m_tick = nullptr;               // updates the elapsed times
     QTableWidget*   m_runs = nullptr;
     QPlainTextEdit* m_runDetails = nullptr;
 

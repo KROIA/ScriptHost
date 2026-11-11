@@ -2,10 +2,12 @@
 // One run of a script: a worker thread with its own JavaScript engine.
 // Private to the library.
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJSValue>
 #include <QJsonObject>
 #include <QList>
+#include <QMap>
 #include <QMutex>
 #include <QSet>
 #include <QSharedPointer>
@@ -25,7 +27,7 @@ struct ScriptMethodInfo
 {
     QString name;
     bool    readOnly = false;
-    bool    local = false;      // log, progress, sleep, pause: handled by the runner
+    bool    local = false;      // log, progress, sleep, pause, the timers: handled by the runner
     int     maxCalls = 0;       // of this method per run; 0 = no limit of its own
     QString exampleJson;        // what a dry run answers; empty = {"dry_run":true}
 };
@@ -35,7 +37,7 @@ struct ScriptRunConfig
     QString                 code;
     QString                 argsJson = QStringLiteral("{}");
     QList<ScriptMethodInfo> methods;
-    int  maxCalls = 5000;
+    int  maxCalls = 5000;       // 0 = no limit
     int  maxLogLines = 200;
     bool compileOnly = false;   // syntax check: nothing is installed, nothing is called
     bool dryRun = false;        // methods that change something are recorded, not called
@@ -83,6 +85,10 @@ public:
     // Called by the script (worker thread) before a statement, when it runs
     // with statement stepping. `read` gives the variables visible there.
     void handleStep(int line, const QJSValue& read);
+    // setTimeout / setInterval (repeat) and their clear functions (worker
+    // thread). `fn` takes no arguments; the prelude binds them.
+    double addTimer(const QJSValue& fn, double ms, bool repeat);
+    void clearTimer(double id);
 
 signals:
     // The script calls a method of the application; answer through the shared state.
@@ -101,6 +107,9 @@ protected:
 
 private:
     QJsonObject execute(QJSEngine& engine);
+    // The error result of a call through the prelude's run(); empty when the
+    // function returned, `payload` then holding what it returned.
+    QJsonObject failure(const QJSValue& outcome, QJsonObject& payload) const;
     bool stopRequested(QString* reason = nullptr) const;
     bool waitWhilePaused(int line, const QString& name, const QString& argsJson);
     QString variablesJson(int line);
@@ -114,10 +123,11 @@ private:
     QJsonObject                      m_result;
 
     // Worker thread only.
+    QElapsedTimer               m_clock;        // since the run began
     QHash<QString, int>         m_calls;        // method -> number of calls
     QHash<QString, QStringList> m_wouldCall;    // dry run: first argument lists per method
-    QStringList                 m_log;
-    int                         m_logLines = 0;
+    QStringList                 m_log;          // the latest maxLogLines lines
+    qint64                      m_logLines = 0;
     int                         m_callCount = 0;
     quint64                     m_nextId = 0;
     QString                     m_limitMessage;
@@ -127,6 +137,15 @@ private:
     QJSValue                    m_stepScope;        // the reader of the statement last begun
     int                         m_stepLine = 0;
     bool                        m_stepPaused = false;   // stopped before that statement
+    // Timers, by id. Ids grow, so of timers due at once the first set fires first.
+    struct Timer
+    {
+        QJSValue fn;
+        qint64   due = 0;           // on m_clock
+        qint64   interval = 0;      // 0 = once
+    };
+    QMap<qint64, Timer>         m_timers;
+    qint64                      m_lastTimerId = 0;
 };
 
 // The object the script's method wrappers talk to.
@@ -140,6 +159,8 @@ public:
         return m_runner->handleCall(name, argsJson, stack);
     }
     Q_INVOKABLE void step(int line, const QJSValue& read) { m_runner->handleStep(line, read); }
+    Q_INVOKABLE double timer(const QJSValue& fn, double ms, bool repeat) { return m_runner->addTimer(fn, ms, repeat); }
+    Q_INVOKABLE void clearTimer(double id) { m_runner->clearTimer(id); }
 
 private:
     ScriptRunner* m_runner;

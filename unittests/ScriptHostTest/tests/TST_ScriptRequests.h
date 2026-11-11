@@ -115,9 +115,11 @@ private:
         TestSupport::registerDb(engine, db);
         bool startedExternal = false;
         bool externalWhileRunning = false;
-        QObject::connect(&engine, &Engine::runStarted, [&](const QString&, bool external) {
+        Engine::RunId startedId = 0;
+        QObject::connect(&engine, &Engine::runStarted, [&](Engine::RunId id, const QString&, bool external) {
+            startedId = id;
             startedExternal = external;
-            externalWhileRunning = engine.isExternalRun();
+            externalWhileRunning = engine.isExternalRun(id);
         });
 
         QJsonObject result = TestSupport::request(engine,
@@ -126,7 +128,7 @@ private:
         TEST_COMPARE(result["result"].toInt(), 42);
         TEST_ASSERT(startedExternal);
         TEST_ASSERT(externalWhileRunning);
-        TEST_ASSERT(!engine.isExternalRun());
+        TEST_ASSERT(!engine.isExternalRun(startedId));
         TEST_COMPARE(engine.runs().size(), 1);
         TEST_ASSERT(engine.runs().last().external);
         TEST_COMPARE(engine.runs().last().args["a"].toInt(), 21);
@@ -145,13 +147,16 @@ private:
         TEST_COMPARE(db.writes, 0);
         TEST_ASSERT(engine.runs().last().dryRun);
 
-        // One at a time: a request while the application's script runs.
+        // At the limit of runs at once: a request while the application's script runs.
+        Engine::Limits limits;
+        limits.maxConcurrentRuns = 1;
+        engine.setLimits(limits);
         bool done = false;
         engine.run("sleep(60000);", TestSupport::Options(), [&](const QJsonObject&) { done = true; });
         result = TestSupport::request(engine, TestSupport::codeRequest("return 1;"));
         TEST_COMPARE(result["phase"].toString(), QString("unavailable"));
-        TEST_ASSERT(result["message"].toString().contains("another script is running"));
-        engine.stop();
+        TEST_ASSERT(result["message"].toString().contains("the limit of 1"));
+        engine.stopAll();
         TEST_ASSERT(TestSupport::spin([&]() { return done; }, 5000));
     }
 
@@ -180,7 +185,7 @@ private:
         engine.setLibrary(&library);
         TEST_ASSERT(engine.library() == &library);
         QString startedName;
-        QObject::connect(&engine, &Engine::runStarted, [&](const QString& name, bool) { startedName = name; });
+        QObject::connect(&engine, &Engine::runStarted, [&](Engine::RunId, const QString& name, bool) { startedName = name; });
         byName.name = "count OLD";                                  // any case
         result = TestSupport::request(engine, byName);
         TEST_COMPARE(result["status"].toString(), QString("ok"));
