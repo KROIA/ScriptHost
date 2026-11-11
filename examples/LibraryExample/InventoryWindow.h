@@ -3,6 +3,7 @@
 #include <QMainWindow>
 #include <QPointer>
 
+class QLabel;
 class QPlainTextEdit;
 class QTableWidget;
 
@@ -22,7 +23,7 @@ private:
     void openScripts();
     void newScript();
     void runRestock(bool dryRun);
-    void startMonitor();
+    void runUntilStopped(const QString& name, const QJsonObject& args = QJsonObject());
     void requestScript();
 
     void saveScriptSettings();
@@ -30,6 +31,7 @@ private:
 
     QTableWidget*   m_table = nullptr;
     QPlainTextEdit* m_log = nullptr;
+    QLabel*         m_input = nullptr;
 
     ScriptHost::ScriptEngine*  m_engine = nullptr;
     ScriptHost::ScriptLibrary* m_library = nullptr;

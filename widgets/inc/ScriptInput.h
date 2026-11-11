@@ -23,7 +23,11 @@ class ScriptEngine;
 //   input.mouse()  {x, y (in source), inside: bool, buttons: [...]}
 // a read-only method this registers (group "Input"; it counts as a call).
 // Key events reach `source` only while it, or a child that ignores them,
-// has the focus. Nothing is consumed: `source` sees every event as before.
+// has the focus - a plain QWidget takes none without a focus policy such as
+// Qt::StrongFocus. Clicks reach it when they hit `source` or a child that
+// ignores them; a scroll area gets its clicks on its viewport(). Nothing is
+// consumed: `source` sees every event as before. A run has input.mouse()
+// only when forwardInput() came before the run started.
 //
 // Requested runs get neither events nor input.mouse() unless the
 // application allows them: allowEventForRequestedRuns("key"), and

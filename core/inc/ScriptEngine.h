@@ -258,16 +258,19 @@ public:
     // ---- Events -----------------------------------------------------------
     // A script subscribes with on(name, fn) and unsubscribes with
     // off(name, fn) or off(name) (every handler of the name). postEvent()
-    // hands `data` to every active run with a handler for `name`, or to the
-    // one run `id`; a run without one does not get it, not even later. Each
-    // run calls its handlers on its own thread, with `data` as a plain
-    // object, in the order the events were posted - once its body has
-    // returned, between its timers. An event is not a method call and does
-    // not count toward maxCalls. A run with a handler goes on running after
-    // its body returned, like one with timers, until off() removed the last
-    // handler and no timer is left, it is stopped or it reaches its time
-    // limit; an exception thrown in a handler ends the run as a "runtime"
-    // error. ScriptHostWidgets posts "key" and "mouse": forwardInput().
+    // - on this object's thread - hands `data` to every active run with a
+    // handler for `name`, or to the one run `id`; a run without one does not
+    // get it, not even later. Each run calls its handlers on its own thread,
+    // with `data` as a plain object, in the order the events were posted -
+    // once its body has returned, between its timers, ahead of timers that
+    // are due. An event posted while the body still runs (a loop, sleep())
+    // waits in the run's queue until the body has returned. An event is not
+    // a method call and does not count toward maxCalls. A run with a
+    // handler goes on running after its body returned, like one with timers,
+    // until off() removed the last handler and no timer is left, it is
+    // stopped or it reaches its time limit; an exception thrown in a handler
+    // ends the run as a "runtime" error. ScriptHostWidgets posts "key" and
+    // "mouse": forwardInput().
     void postEvent(const QString& name, const QJsonObject& data);
     void postEvent(RunId id, const QString& name, const QJsonObject& data);
     // A requested run (requestRun(), or RunOptions::external) gets no event

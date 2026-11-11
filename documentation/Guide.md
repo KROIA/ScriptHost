@@ -43,14 +43,14 @@ engine->registerMethod(read, [this](const QJsonObject& args) -> QJsonValue {
 engine->run("return db.readObject('a1').name;", {}, [](const QJsonObject& result) { ... });
 ```
 
-`examples/LibraryExample` is a complete application: an inventory table with its methods, saved scripts, the Scripts window, the editor, a requested run and a stock monitor that runs until it is stopped, in the order an application sets them up. `examples/ConsoleExample` is the engine alone in a `QCoreApplication`, its script's lines printed to stdout.
+`examples/LibraryExample` is a complete application: an inventory table with its methods, saved scripts, the Scripts window, the editor, a requested run, a stock monitor that runs until it is stopped and an input logger that reacts to keys and clicks, in the order an application sets them up. `examples/ConsoleExample` is the engine alone in a `QCoreApplication`, its script's lines printed to stdout.
 
 ### Two libraries
 
 | Library | Qt modules | Include | Contains |
 |---|---|---|---|
 | `ScriptHost` | Core, Qml | `ScriptHost.h` | `ScriptEngine`, `ScriptMethod`, `ScriptLibrary`: everything to run scripts |
-| `ScriptHostWidgets` | Core, Qml, Gui, Widgets | `ScriptHostWidgets.h` (includes `ScriptHost.h`) | `ScriptsWidget`, `ScriptEditorDialog` with its debugger, the approval dialog (`useApprovalDialog`) |
+| `ScriptHostWidgets` | Core, Qml, Gui, Widgets | `ScriptHostWidgets.h` (includes `ScriptHost.h`) | `ScriptsWidget`, `ScriptEditorDialog` with its debugger, the approval dialog (`useApprovalDialog`), keys and mouse for scripts (`forwardInput`) |
 
 A program without windows - a service, a command-line tool - links the engine alone and needs neither Qt Gui nor Qt Widgets. In a project built from the same CMake template, `ScriptHost.cmake` in the `dependencies/` folder links both libraries; for the engine alone, set this before it is included:
 
@@ -134,9 +134,13 @@ Registering a name again replaces the method; `unregisterMethod(name)` removes i
 | `setTimeout(fn, ms, ...args)` | Calls `fn(...args)` once, after `ms` milliseconds. Returns the timer's number |
 | `setInterval(fn, ms, ...args)` | Calls `fn(...args)` every `ms` milliseconds (at least 1). Returns the timer's number |
 | `clearTimeout(id)`, `clearInterval(id)` | Cancels a timer; a timer's function may cancel its own |
+| `on(name, fn)` | Calls `fn(data)` for each event `name` the application posts, once the body has returned. See [Events](#events-keys-mouse-and-your-own) |
+| `off(name, fn)`, `off(name)` | Removes `fn` as a handler of `name`; without `fn`, every handler of `name` |
 | `args` | The arguments of the run |
 
-The built-ins are not method calls: they do not count toward `maxCalls` and are not listed in `calls`. A timer keeps the run going after the script's end; see [Timers](#timers-scripts-that-run-on).
+The built-ins are not method calls: they do not count toward `maxCalls` and are not listed in `calls`. A timer or an event handler keeps the run going after the script's end; see [Timers](#timers-scripts-that-run-on) and [Events](#events-keys-mouse-and-your-own).
+
+`input.mouse()` - where the pointer is - is no built-in: `forwardInput()` registers it as a read-only method (group `Input`), and like any method it counts as a call.
 
 ### Switching methods on and off
 
@@ -237,11 +241,11 @@ setInterval(() => {
 return "monitoring";
 ```
 
-The script's body runs first; what it returns is the run's `result`. Then the run waits for its timers and calls each one when it is due, on the script's thread, one after the other. The run ends
+The script's body runs first; what it returns is the run's `result`. Then the run waits for its timers and calls each one when it is due, on the script's thread, one after the other. Event handlers (`on`) are called the same way, between the timers. The run ends
 
-- when no timer is left (every `setTimeout` fired or cleared, every `setInterval` cleared): with the result of the body, `duration_ms` counting the whole time;
+- when no timer and no event handler is left (every `setTimeout` fired or cleared, every `setInterval` cleared, every handler removed with `off`): with the result of the body, `duration_ms` counting the whole time;
 - when it is stopped (phase `cancelled`) or reaches its time limit (phase `limit`): what the body returned is lost;
-- when a timer's function throws: phase `runtime`, with the line.
+- when a timer's function or an event handler throws: phase `runtime`, with the line.
 
 `check()` knows the timer functions and `apiDefinition()` declares them. A timer's function calls methods like the body does, and those calls count toward the limits.
 
@@ -320,6 +324,175 @@ engine->setOutput(&out);
 
 Each line is `[<RunOptions::name, or #<RunId> when the run has no name>] <text>` and a newline, in UTF-8, written on the engine's thread; a `QFileDevice` is flushed after each line. The engine does not own the device: the application opens it, keeps it alive and closes it. A device that is deleted is dropped; `setOutput(nullptr)` (the default) writes nowhere. `output()` returns the device.
 
+## Events: keys, mouse and your own
+
+A script can react to what happens in the application while it runs: keys, mouse clicks, or events the application posts itself - a tick, a sensor value, a message that came in.
+
+```js
+// the script
+on('key', event => {
+    if (event.type === 'down' && event.key === 'Space')
+        print('jump');
+});
+on('sensor', data => print('temperature', data.temperature));
+return 'listening';
+```
+
+```cpp
+// the application
+engine->postEvent("sensor", QJsonObject{{"temperature", 21.5}});
+```
+
+`on(name, fn)` subscribes, `off(name, fn)` removes one handler, `off(name)` every handler of the name. `postEvent(name, data)` hands `data` to every active run that has a handler for `name`; `postEvent(id, name, data)` to the one run `id`. A run without a handler for the name does not get the event - not later either, when it subscribes after it was posted. The handler gets `data` as a plain object. `postEvent()` is called on the engine's thread, like the rest of the engine.
+
+### When events arrive
+
+**Events are delivered only after the script's body has returned** - between timers, the way timer functions run. They do not arrive while the body is still running: not during `sleep()`, not inside a loop. An event posted then (after `on()`) waits in the run's queue until the body has returned.
+
+The right pattern: register the handlers, do periodic work with `setInterval`, and return.
+
+```js
+let x = 0, speed = 0;
+on('key', event => {
+    if (event.key === 'Left')  speed = event.type === 'down' ? -1 : 0;
+    if (event.key === 'Right') speed = event.type === 'down' ? 1 : 0;
+});
+setInterval(() => {             // the per-frame work
+    x += speed;
+    game.moveTo(x);
+}, 16);
+return 'running';               // now the events come
+```
+
+The wrong pattern - the handler never runs, as the body never returns:
+
+```js
+on('key', event => { speed = 1; });
+while (true) {                  // events wait until the body returns: never
+    game.moveTo(x += speed);
+    sleep(16);
+}
+```
+
+Events are delivered in the order they were posted, and ahead of timers that are due at the same time. Each run calls its handlers on its own thread, one at a time. An event is not a method call: it does not count toward `maxCalls` and is not listed in `calls` - but what a handler calls is, and so is `input.mouse()`. An exception thrown in a handler ends the run with phase `runtime`.
+
+The queue has no limit: an application that posts faster than a script handles, say on every mouse move, delays the script's timers and fills memory. That is why mouse moves are not posted (below).
+
+### How long a run with handlers lives
+
+A run with a handler goes on after its body returned, like a run with timers: until `off()` removed its last handler and no timer is left, until it is stopped, or until it reaches its time limit. With the engine's `Limits` that is 5 minutes - an input script meant to run as long as the application does needs the opt-in of [Running until stopped](#running-until-stopped):
+
+```cpp
+ScriptHost::ScriptEngine::RunOptions options;
+options.name = "Input logger";
+options.timeoutMs = 0;          // no time limit
+options.maxCalls  = 0;          // no call limit
+engine->run(code, options, done);
+```
+
+A script ends itself by removing its handlers:
+
+```js
+on('key', event => {
+    if (event.key === 'Escape') {
+        off('key');
+        off('mouse');           // no handler and no timer left: the run ends
+    }
+});
+```
+
+### Keys and the mouse: forwardInput
+
+ScriptHostWidgets turns a widget's keys and mouse clicks into events:
+
+```cpp
+#include "ScriptHostWidgets.h"
+
+gameView->setFocusPolicy(Qt::StrongFocus);                     // to get keys at all
+QObject* forwarder = ScriptHost::forwardInput(engine, gameView);
+...
+delete forwarder;                                              // to stop forwarding
+```
+
+It posts `"key"` and `"mouse"` events and registers the method `input.mouse()`. The forwarder is a child of the widget and goes with it; deleting it stops forwarding, and `input.mouse()` goes with the latest forwarder. The widget sees every event as before: nothing is consumed.
+
+**Focus:** key events arrive only while the forwarded widget - or a child of it that does not handle the key - has the keyboard focus. A plain `QWidget` or `QLabel` takes no focus until `setFocusPolicy(Qt::StrongFocus)`; then a click gives it. In the same way, clicks arrive when they hit the widget itself or a child that does not handle them. A scroll area (item views, text edits, `QGraphicsView`) receives its clicks on its `viewport()`, and an editable view uses the keys itself: a plain widget of its own for the input works best.
+
+`"key"`:
+
+| Field | |
+|---|---|
+| `type` | `"down"` or `"up"` |
+| `key` | The name of the `Qt::Key` without `Key_`: `"A"`, `"1"`, `"Space"`, `"Escape"`, `"Left"`, `"PageUp"`, `"F1"`. Empty for a key Qt has no name for |
+| `code` | The `Qt::Key` value, a number |
+| `text` | The text the key types: `"a"`, `"A"` with shift; empty for keys that type nothing |
+| `modifiers` | The modifiers held, of `"shift"`, `"control"`, `"alt"`, `"meta"` |
+| `repeat` | `true` for the repeats of a held key |
+
+`"mouse"`:
+
+| Field | |
+|---|---|
+| `type` | `"down"`, `"up"`, `"dblclick"` or `"wheel"`. Moves are not posted |
+| `button` | The button of this event: `"left"`, `"right"`, `"middle"`, `"back"`, `"forward"`, `"other"`; `"none"` for the wheel |
+| `buttons` | The buttons held, by the same names |
+| `x`, `y` | Where, in the forwarded widget's coordinates |
+| `modifiers` | As for keys |
+| `deltaX`, `deltaY` | Wheel only: the angle turned, 120 per notch; `deltaY > 0` away from the user |
+
+A double click comes as `down`, `up`, `dblclick`, `up`.
+
+`input.mouse()` returns where the pointer is now, for scripts that need the position between clicks:
+
+| Field | |
+|---|---|
+| `x`, `y` | In the forwarded widget's coordinates (of the latest `forwardInput()` call) |
+| `inside` | The pointer is over the widget |
+| `buttons` | The buttons held |
+
+A run sees the methods there were when it started, so `forwardInput()` comes before the run; while there is no forwarder, `check()` reports `no method 'input.mouse'`.
+
+### Requested runs get no events
+
+A requested run - from `requestRun()`, or any run with `RunOptions::external` - comes from another program. If it could subscribe to `"key"`, it could log everything the user types, passwords included. So **requested runs get no events by default**: their `on(name, ...)` throws, and the run ends with phase `runtime`:
+
+```
+the application does not let requested scripts receive 'key' events
+```
+
+The application allows event names one by one:
+
+```cpp
+engine->allowEventForRequestedRuns("sensor");   // its own, harmless events
+engine->allowEventForRequestedRuns("mouse");    // clicks, and input.mouse()
+// engine->allowEventForRequestedRuns("key");   // only for a requester trusted with the keyboard
+```
+
+`"mouse"` also gates `input.mouse()`: without it, the call throws `the application does not let requested scripts read the mouse`. A run keeps what was allowed when it started; `allowEventForRequestedRuns(name, false)` takes it back for later runs. `isEventAllowedForRequestedRuns(name)` asks.
+
+Method handlers can apply the same rule: `callingRun()` is the run whose call is being handled (0 outside a handler; an asynchronous handler sees it only until it returns), and `isExternalRun(callingRun())` tells whether it is a requested one.
+
+### Events of your own, without widgets
+
+An engine-only application posts what it has. A `QCoreApplication` that reads a sensor:
+
+```cpp
+QTimer* poll = new QTimer(&app);
+QObject::connect(poll, &QTimer::timeout, [&]() {
+    engine.postEvent("sensor", QJsonObject{{"temperature", sensor.read()}});
+});
+poll->start(1000);
+```
+
+```js
+let high = 0;
+on('sensor', data => {
+    if (data.temperature > 30 && ++high === 3)
+        print('too hot for three readings');
+});
+return 'watching';
+```
+
 ## Requested runs
 
 `requestRun()` is for runs that somebody other than the user asks for: a plugin, a remote connection, an assistant.
@@ -343,7 +516,7 @@ What happens, in order:
 4. The script is checked (syntax, methods). A mistake comes back at once; the user is not bothered.
 5. Approval, where the kind of script needs it (below). Declined: `{"status":"error","phase":"declined","message":"the user declined the script","reason":"..."}`. No approval handler set: phase `approval`.
 6. If an `abandoned` function was given, it is asked now. True: nobody waits for the result any more, and the run is dropped without one.
-7. The script runs, with the engine's `Limits` - a request cannot choose others. `done` always gets a result, except for an abandoned request.
+7. The script runs, with the engine's `Limits` - a request cannot choose others - and gets only the events the application allows (see [Requested runs get no events](#requested-runs-get-no-events)). `done` always gets a result, except for an abandoned request.
 
 The run is recorded with `external` set: `isExternalRun(id)` is true while it runs, `runStarted` has `external == true`, and the `RunRecord` in `runs()` has `external` set.
 
@@ -502,13 +675,16 @@ What the sections above did not need.
 |---|---|
 | `methods()`, `hasMethod(name)` | The registered methods |
 | `check(code)` returns `Check` | `ok`; when not: `phase` (`syntax` or `check`), `line`, `message`, `didYouMean`. Always: `methods` and `changingMethods` the script uses, `dynamic` (it picks methods by computed names). `toJson()` gives the error as a result object |
-| `RunOptions::external` | Marks the run as requested, in the record and in `runStarted`. `requestRun()` sets it |
+| `RunOptions::external` | Marks the run as requested, in the record and in `runStarted`, and it gets only the events `allowEventForRequestedRuns()` allows. `requestRun()` sets it |
 | `RunOptions::readOnlyOnly` | A call to a method that is not read-only stops the script (phase `approval`). `requestRun()` sets it for a script that runs unasked as a reading one |
 | `RunOptions::timeoutMs`, `maxCalls` | This run's limits: -1 (default) the engine's `Limits`, 0 none. See [Running until stopped](#running-until-stopped) |
 | `setBreakpoints(lines)` | Changes the breakpoints of the run in the debugger |
 | `runs()`, `clearRuns()` | The finished runs of the session (the latest 100), oldest first, as `RunRecord`: `id`, `started`, `name`, `code`, `args`, `result`, `dryRun`, `external` |
 | `setOutput(device)`, `output()` | Where log lines are written besides `runLog`. See [Output](#output) |
 | `setApprovalHandler(handler)` | Decides requested runs that need approval. See [Approval](#approval) |
+| `postEvent(name, data)`, `postEvent(id, name, data)` | An event for every run with a handler for `name`, or for the one run. See [Events](#events-keys-mouse-and-your-own) |
+| `allowEventForRequestedRuns(name, allow)`, `isEventAllowedForRequestedRuns(name)` | Which events requested runs get. See [Requested runs get no events](#requested-runs-get-no-events) |
+| `callingRun()` | In a method's handler: the run that called it; 0 elsewhere |
 
 | `ScriptMethod` | |
 |---|---|
@@ -542,6 +718,11 @@ What the sections above did not need.
 | `breakpoints()`, `toggleBreakpoint(line)`, `pausedLine()`, `errorLine()`, `isOwnRunActive()` | The state of the editor and of the run it started |
 | `saved(name)` | Signal: the script was saved into the library |
 
+| ScriptHostWidgets functions | |
+|---|---|
+| `useApprovalDialog(engine, parent)` | Installs the approval dialog as the engine's approval handler. See [Approval](#approval) |
+| `forwardInput(engine, widget)` | Posts the widget's keys and clicks as events, registers `input.mouse()`; returns the forwarder, delete it to stop. See [Keys and the mouse](#keys-and-the-mouse-forwardinput) |
+
 Every control of the two widgets and of the approval dialog has an object name that starts with `scripthost_`, for tests and for tools that address widgets by name. The lists are in the headers.
 
 ## Signals
@@ -557,6 +738,15 @@ Every `run*` signal names its run first.
 | `runPaused(id, line, method, arguments, variables)`, `runCallFinished(id, line, method, arguments, value, error)` | Debugger |
 | `runsChanged()` | `runs()` changed |
 | `enabledChanged(bool)`, `methodsChanged()`, `settingsChanged()` | Switches and locks |
+
+## New in 2.1
+
+Nothing breaks; 2.1 adds [events](#events-keys-mouse-and-your-own):
+
+- `on(name, fn)` and `off(name[, fn])` in scripts; `postEvent(name, data)` and `postEvent(id, name, data)` in the application.
+- `forwardInput(engine, widget)` (ScriptHostWidgets): `"key"` and `"mouse"` events, and `input.mouse()` for the pointer.
+- `allowEventForRequestedRuns(name)` / `isEventAllowedForRequestedRuns(name)`: requested runs get no events unless allowed.
+- `callingRun()`: the run whose method call a handler serves.
 
 ## Migrating from 1.x to 2.0
 

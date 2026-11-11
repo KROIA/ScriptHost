@@ -8,12 +8,13 @@
 //   5. Say where saved scripts live: shipped ones (read-only) and the user's.
 //   6. Restore the user's choices from the last session.
 //   7. Show what scripts do (signals), and offer the user the widgets.
+//   8. Hand the user's keys and clicks to scripts that ask for them.
 //
 // Everything else - checking a script before it runs, limits, the approval
 // dialog, the Scripts window with its editor and debugger - comes from the
 // library. The toolbar at the end shows the three ways a script starts:
 // run() by the application, the editor by the user, requestRun() by another
-// program - and a script that runs until it is stopped, beside the others.
+// program - and scripts that run until they are stopped, beside the others.
 
 #include "InventoryWindow.h"
 #include <QDir>
@@ -21,6 +22,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QPlainTextEdit>
 #include <QSettings>
 #include <QSplitter>
@@ -35,6 +37,7 @@ namespace
 const char* const kScriptSettingsKey = "scripting/userSettings";
 const char* const kRestockScript = "Restock low items";
 const char* const kMonitorScript = "Stock monitor";
+const char* const kInputScript = "Input logger";
 
 // ---- Helpers for the table: the application's own data, nothing ScriptHost-specific
 
@@ -109,11 +112,23 @@ InventoryWindow::InventoryWindow(QWidget* parent)
     m_log->setReadOnly(true);
     m_log->setPlaceholderText("Script runs and their log lines appear here.");
 
+    // Where the user's keys and clicks go to scripts (step 8). A plain widget
+    // of its own: in the table, typing would edit cells, and a scroll area's
+    // clicks land on its viewport.
+    m_input = new QLabel("Input for scripts: click here, then type", this);
+    m_input->setObjectName("scriptInput");
+    m_input->setAlignment(Qt::AlignCenter);
+    m_input->setFrameShape(QFrame::StyledPanel);
+    m_input->setMinimumHeight(48);
+    m_input->setFocusPolicy(Qt::StrongFocus);
+
     auto* split = new QSplitter(Qt::Vertical, this);
     split->addWidget(m_table);
+    split->addWidget(m_input);
     split->addWidget(m_log);
     split->setStretchFactor(0, 3);
-    split->setStretchFactor(1, 2);
+    split->setStretchFactor(1, 0);
+    split->setStretchFactor(2, 2);
     setCentralWidget(split);
 
     setUpScripting();
@@ -179,6 +194,15 @@ void InventoryWindow::setUpScripting()
             [this](ScriptHost::ScriptEngine::RunId, const QJsonObject& result) {
         appendLog("[run] finished: " + compact(result).left(400));
     });
+
+    // ---- 8. Keys and clicks -----------------------------------------------
+    // What the input area receives reaches scripts as "key" and "mouse"
+    // events (on('key', fn)), and input.mouse() tells them where the pointer
+    // is. Keys arrive only while the area has the focus - a click into it
+    // gives it. Requested runs get none of it unless allowed:
+    // m_engine->allowEventForRequestedRuns("key") - not done here, as a
+    // program that may read the user's keys could log them.
+    ScriptHost::forwardInput(m_engine, m_input);
 }
 
 void InventoryWindow::registerMethods()
@@ -277,7 +301,10 @@ void InventoryWindow::buildToolBar()
     bar->addAction(QString("Run '%1'").arg(kRestockScript), this, [this]() { runRestock(false); });
     bar->addAction(QString("Dry run '%1'").arg(kRestockScript), this, [this]() { runRestock(true); });
     bar->addSeparator();
-    bar->addAction(QString("Start '%1'").arg(kMonitorScript), this, [this]() { startMonitor(); });
+    bar->addAction(QString("Start '%1'").arg(kMonitorScript), this, [this]() {
+        runUntilStopped(kMonitorScript, QJsonObject{{"threshold", 50}, {"seconds", 5}});
+    });
+    bar->addAction(QString("Start '%1'").arg(kInputScript), this, [this]() { runUntilStopped(kInputScript); });
     bar->addSeparator();
     bar->addAction("Request a script", this, [this]() { requestScript(); });
 }
@@ -343,31 +370,33 @@ void InventoryWindow::runRestock(bool dryRun)
     });
 }
 
-// A script that runs until it is stopped: it sets an interval timer and
-// checks the stock on every tick. Several runs go on at once, so the toolbar
-// and the editor stay usable beside it; every run has an id (RunId), and the
-// Scripts window lists the active ones, each with a Stop button.
-void InventoryWindow::startMonitor()
+// Scripts that run until they are stopped: the stock monitor sets an
+// interval timer and checks the stock on every tick; the input logger
+// subscribes to key and mouse events with on(). Several runs go on at once,
+// so the toolbar and the editor stay usable beside them; every run has an id
+// (RunId), and the Scripts window lists the active ones, each with a Stop
+// button.
+void InventoryWindow::runUntilStopped(const QString& name, const QJsonObject& args)
 {
-    const ScriptHost::ScriptLibrary::Script script = m_library->script(kMonitorScript);
+    const ScriptHost::ScriptLibrary::Script script = m_library->script(name);
     if (!script.isValid()) {
-        appendLog(QString("[run] there is no script '%1'").arg(kMonitorScript));
+        appendLog(QString("[run] there is no script '%1'").arg(name));
         return;
     }
     ScriptHost::ScriptEngine::RunOptions options;
     options.name = script.name;
-    options.args = QJsonObject{{"threshold", 50}, {"seconds", 5}};
+    options.args = args;
     // The engine's Limits (5 minutes, 5000 calls) would end it. The
-    // application lets its own monitor run on: 0 = no limit, -1 (the
+    // application lets its own script run on: 0 = no limit, -1 (the
     // default) = the engine's. requestRun() cannot do this.
     options.timeoutMs = 0;
     options.maxCalls = 0;
-    const ScriptHost::ScriptEngine::RunId id = m_engine->run(script.code, options, [this](const QJsonObject& result) {
+    const ScriptHost::ScriptEngine::RunId id = m_engine->run(script.code, options, [this, name](const QJsonObject& result) {
         if (result["status"].toString() != "ok")
-            appendLog("[run] the monitor ended: " + result["message"].toString());
+            appendLog(QString("[run] '%1' ended: %2").arg(name, result["message"].toString()));
     });
     if (id != 0)
-        appendLog(QString("[run] the monitor is run #%1; stop it in Scripts..., tab Runs").arg(id));
+        appendLog(QString("[run] '%1' is run #%2; stop it in Scripts..., tab Runs").arg(name).arg(id));
 }
 
 // Another program asks: requestRun(). A real application would do this when

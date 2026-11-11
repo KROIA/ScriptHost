@@ -5,5 +5,6 @@
         <file>scripts/restock-low-items.js</file>
         <file>scripts/inventory-report.js</file>
         <file>scripts/stock-monitor.js</file>
+        <file>scripts/input-logger.js</file>
     </qresource>
 </RCC>
