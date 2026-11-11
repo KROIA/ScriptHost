@@ -194,7 +194,8 @@ ScriptsWidget::ScriptsWidget(QWidget* parent)
     split->setChildrenCollapsible(false);
     m_activeRuns = makeTable({tr("Running script"), tr("By"), tr("Started"), tr("Running for"), QString()},
                              "scripthost_scriptsActiveRuns", 0, split);
-    m_activeRuns->setSelectionMode(QAbstractItemView::NoSelection);
+    m_activeRuns->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_activeRuns->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tick = new QTimer(this);
     m_tick->setInterval(1000);
     connect(m_tick, &QTimer::timeout, this, &ScriptsWidget::updateElapsed);
@@ -217,9 +218,26 @@ ScriptsWidget::ScriptsWidget(QWidget* parent)
     runsLayout->addLayout(runsButtons);
     tabs->addTab(runsPage, tr("Runs"));
 
+    // One run is shown at a time: an active one or one of the session.
     connect(m_runs, &QTableWidget::itemSelectionChanged, this, [this]() {
         const QList<QTableWidgetItem*> selected = m_runs->selectedItems();
         m_selectedRun = selected.isEmpty() ? QDateTime() : selected.first()->data(Qt::UserRole).toDateTime();
+        if (!selected.isEmpty()) {
+            m_shownActive = 0;
+            const QSignalBlocker blocker(m_activeRuns);
+            m_activeRuns->clearSelection();
+        }
+        showRunDetails();
+    });
+    connect(m_activeRuns, &QTableWidget::itemSelectionChanged, this, [this]() {
+        const QList<QTableWidgetItem*> selected = m_activeRuns->selectedItems();
+        m_shownActive = selected.isEmpty() ? 0 : m_activeRuns->item(selected.first()->row(), 0)
+                                                     ->data(Qt::UserRole).toULongLong();
+        if (m_shownActive != 0) {
+            m_selectedRun = QDateTime();
+            const QSignalBlocker blocker(m_runs);
+            m_runs->clearSelection();
+        }
         showRunDetails();
     });
     connect(clear, &QPushButton::clicked, this, [this]() {
@@ -249,8 +267,11 @@ void ScriptsWidget::setScripting(ScriptEngine* scripting)
         connect(m_scripting, &ScriptEngine::methodsChanged, this, &ScriptsWidget::refreshMethods);
         connect(m_scripting, &ScriptEngine::runsChanged, this, &ScriptsWidget::refreshRuns);
         connect(m_scripting, &ScriptEngine::runStarted, this, &ScriptsWidget::refreshActiveRuns);
-        connect(m_scripting, &ScriptEngine::runFinished, this, &ScriptsWidget::refreshActiveRuns);
+        connect(m_scripting, &ScriptEngine::runFinished, this, &ScriptsWidget::onRunFinished);
+        connect(m_scripting, &ScriptEngine::runLog, this, &ScriptsWidget::onRunLog);
     }
+    m_shownActive = 0;
+    m_liveLogs.clear();
     refresh();
 }
 
@@ -521,21 +542,31 @@ void ScriptsWidget::refreshRuns()
 
 void ScriptsWidget::refreshActiveRuns()
 {
+    const QSignalBlocker blocker(m_activeRuns);
     m_activeRuns->setRowCount(0);
     const QList<ScriptEngine::RunId> ids = m_scripting ? m_scripting->activeRuns() : QList<ScriptEngine::RunId>();
+    const QDate today = QDate::currentDate();
     for (const ScriptEngine::RunId id : ids) {
         const ScriptEngine::RunRecord record = m_scripting->activeRun(id);
+        // A run of an earlier day says which.
+        const QString started = record.started.toString(record.started.date() == today
+                                                            ? QStringLiteral("HH:mm:ss")
+                                                            : QStringLiteral("yyyy-MM-dd HH:mm:ss"));
         const QStringList cells = {
             record.name.isEmpty() ? tr("(unnamed)") : record.name,
             record.external ? tr("requested by %1").arg(m_scripting->requesterName()) : tr("the user"),
-            record.started.toString(QStringLiteral("HH:mm:ss")),
+            started,
             QString()
         };
         const int row = m_activeRuns->rowCount();
         m_activeRuns->insertRow(row);
         for (int column = 0; column < cells.size(); ++column)
             m_activeRuns->setItem(row, column, new QTableWidgetItem(cells.at(column)));
+        m_activeRuns->item(row, 0)->setData(Qt::UserRole, QVariant::fromValue<quint64>(id));
+        m_activeRuns->item(row, 0)->setToolTip(tr("Run #%1 - select it to see its code and log").arg(id));
         m_activeRuns->item(row, 2)->setData(Qt::UserRole, record.started);
+        if (id == m_shownActive)
+            m_activeRuns->selectRow(row);
         // Stops at once; the row goes when the run has finished.
         auto* stop = new QPushButton(tr("Stop"), m_activeRuns);
         stop->setObjectName(QStringLiteral("scripthost_scriptsActiveRunStop"));
@@ -554,6 +585,36 @@ void ScriptsWidget::refreshActiveRuns()
         m_tick->start();
 }
 
+void ScriptsWidget::onRunFinished(quint64 id)
+{
+    m_liveLogs.remove(id);
+    if (id == m_shownActive) {
+        // It goes on being shown, now with its result, in the runs of the session.
+        m_shownActive = 0;
+        const QList<ScriptEngine::RunRecord> records = m_scripting ? m_scripting->runs()
+                                                                   : QList<ScriptEngine::RunRecord>();
+        for (const ScriptEngine::RunRecord& record : records) {
+            if (record.id == id)
+                m_selectedRun = record.started;
+        }
+        refreshRuns();
+    }
+    refreshActiveRuns();
+}
+
+void ScriptsWidget::onRunLog(quint64 id, const QString& text)
+{
+    QStringList& lines = m_liveLogs[id];
+    lines << text;
+    const int keep = m_scripting ? m_scripting->limits().maxLogLines : 200;
+    if (keep > 0 && lines.size() > keep)
+        lines.removeFirst();
+    // The log is the end of the details: a line is added there, keeping the
+    // user's scroll position.
+    if (id == m_shownActive)
+        m_runDetails->appendPlainText(text);
+}
+
 void ScriptsWidget::updateElapsed()
 {
     const QDateTime now = QDateTime::currentDateTime();
@@ -569,6 +630,23 @@ void ScriptsWidget::updateElapsed()
 
 void ScriptsWidget::showRunDetails()
 {
+    if (m_shownActive != 0 && m_scripting && m_scripting->isRunning(m_shownActive)) {
+        const ScriptEngine::RunRecord record = m_scripting->activeRun(m_shownActive);
+        QString text;
+        text += tr("Run #%1: %2 - running\n").arg(record.id).arg(record.name.isEmpty() ? tr("(unsaved)") : record.name);
+        text += tr("Started: %1 by %2%3\n\n")
+                    .arg(record.started.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                         record.external ? m_scripting->requesterName() : tr("the user"),
+                         record.dryRun ? tr(", dry run") : QString());
+        text += tr("Arguments:\n%1\n\n").arg(prettyJson(record.args));
+        text += tr("Code:\n%1\n\n").arg(record.code);
+        text += tr("Log:");
+        const QStringList lines = m_liveLogs.value(m_shownActive);
+        if (!lines.isEmpty())
+            text += QLatin1Char('\n') + lines.join(QLatin1Char('\n'));
+        m_runDetails->setPlainText(text);
+        return;
+    }
     // Rows are newest first; by position, as two runs may start in the same millisecond.
     const QList<QTableWidgetItem*> selected = m_runs->selectedItems();
     const QList<ScriptEngine::RunRecord> records = m_scripting ? m_scripting->runs() : QList<ScriptEngine::RunRecord>();
@@ -581,7 +659,7 @@ void ScriptsWidget::showRunDetails()
         for (const QJsonValue& line : logged)
             lines << (line.isString() ? line.toString() : prettyJson(line));
         QString text;
-        text += tr("Script: %1\n").arg(record.name.isEmpty() ? tr("(unsaved)") : record.name);
+        text += tr("Run #%1: %2\n").arg(record.id).arg(record.name.isEmpty() ? tr("(unsaved)") : record.name);
         text += tr("Started: %1 by %2%3\n\n")
                     .arg(record.started.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
                          record.external ? m_scripting->requesterName() : tr("the user"),

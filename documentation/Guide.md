@@ -271,7 +271,7 @@ A run that never ends does not grow: it keeps only the latest `maxLogLines` line
 
 Other runs go on. What the script changed before stays changed.
 
-In the widgets: the Runs tab of the Scripts window lists the active runs, each with a Stop button; the editor's Stop button stops only the run that editor started, and closing the editor stops it.
+In the widgets: the Runs tab of the Scripts window lists the active runs, each with a Stop button - a selected one shows its run id, arguments, code and its log as it is written; the editor's Stop button stops only the run that editor started, and closing the editor stops it.
 
 ### The language
 
@@ -467,7 +467,7 @@ Both are in ScriptHostWidgets (`#include "ScriptHostWidgets.h"`). `ScriptHost::S
 - **Switches**: "Allow (requester) to run scripts" and, under "Ask before running", one check box per kind of script.
 - **Scripts**: the saved scripts. New, Edit, Duplicate, Delete, Open folder.
 - **Methods**: every method with a check box; locked ones are greyed out.
-- **Runs**: the runs going on now, each with its elapsed time and a Stop button, and the scripts run in this session, with who started them, code, arguments, result and log.
+- **Runs**: the runs going on now, each with its start, elapsed time and a Stop button - select one to see its run id (`Run #7`), arguments, code and live log; when it ends it stays shown with its result - and the scripts run in this session, with who started them, code, arguments, result and log.
 
 The editor (`ScriptHost::ScriptEditorDialog`) is a window of its own: name, description, parameters, the code, and beside it the reference of the methods a script can call, with search. A double click inserts a call. It can be opened without the Scripts window:
 

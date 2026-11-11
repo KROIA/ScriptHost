@@ -3,7 +3,9 @@
 // Complete, not forward declared: Qt 6 moc needs the slots' pointer return type.
 #include "ScriptEditorDialog.h"
 #include <QDateTime>
+#include <QHash>
 #include <QMap>
+#include <QStringList>
 #include <QPointer>
 #include <QWidget>
 
@@ -24,7 +26,8 @@ class ScriptLibrary;
 // Where the user of an application sees and steers scripting: may the
 // program run scripts, must it ask first, which methods may scripts call,
 // the saved scripts (with the editor), the runs going on now - each with a
-// Stop button, which acts at once - and the runs of this session. The
+// Stop button, which acts at once; a selected one shows its code and its log
+// as it is written - and the runs of this session. The
 // "Scripts" tab of a settings dialog can be one of these; an application with a
 // settings window of its own embeds another.
 //
@@ -92,6 +95,8 @@ private:
     void refreshMethods();
     void refreshRuns();
     void refreshActiveRuns();
+    void onRunFinished(quint64 id);
+    void onRunLog(quint64 id, const QString& text);
     void updateElapsed();
     void updateScriptButtons();
     void showRunDetails();
@@ -128,6 +133,8 @@ private:
     bool                m_immediate = false;
     bool                m_applying = false;
     QDateTime           m_selectedRun;              // RunRecord::started of the shown run
+    quint64             m_shownActive = 0;          // ScriptEngine::RunId of the shown active run, 0 = none
+    QHash<quint64, QStringList> m_liveLogs;         // the log so far of each active run
 };
 
 } // namespace ScriptHost

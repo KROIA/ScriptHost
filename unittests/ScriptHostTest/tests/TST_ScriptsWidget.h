@@ -23,6 +23,7 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTextCursor>
@@ -44,6 +45,7 @@ public:
         ADD_TEST(TST_ScriptsWidget::testEditorReference);
         ADD_TEST(TST_ScriptsWidget::testRuns);
         ADD_TEST(TST_ScriptsWidget::testActiveRuns);
+        ADD_TEST(TST_ScriptsWidget::testActiveRunDetails);
         ADD_TEST(TST_ScriptsWidget::testTwoEditorsRunAtOnce);
     }
 
@@ -652,6 +654,62 @@ private:
         engine.stopAll();
         TEST_ASSERT(TestSupport::spin([&]() { return requestDone; }, 5000));
         TEST_COMPARE(active->rowCount(), 0);
+    }
+
+    // A selected active run shows its id, code and log as it is written; when
+    // it ends it goes on being shown, with its result, among the session's runs.
+    TEST_FUNCTION(testActiveRunDetails)
+    {
+        TEST_START;
+
+        Engine engine;
+        ScriptHost::ScriptsWidget widget;
+        widget.setScripting(&engine);
+        auto* active = widget.findChild<QTableWidget*>("scripthost_scriptsActiveRuns");
+        auto* runs = widget.findChild<QTableWidget*>("scripthost_scriptsRuns");
+        auto* details = widget.findChild<QPlainTextEdit*>("scripthost_scriptsRunDetails");
+        TEST_ASSERT(active && runs && details);
+        if (!active || !runs || !details)
+            return;
+
+        TestSupport::Options options;
+        options.name = "Ticker";
+        QJsonObject ended;
+        const Engine::RunId id = engine.run("log('first');\nwhile (true) { sleep(50); log('tick'); }", options,
+                                            [&](const QJsonObject& r) { ended = r; });
+        TEST_COMPARE(active->rowCount(), 1);
+        TestSupport::spin([]() { return false; }, 200);     // logged before anybody looked
+
+        active->selectRow(0);
+        const QString shown = details->toPlainText();
+        TEST_ASSERT(shown.contains(QString("Run #%1: Ticker - running").arg(id)));
+        TEST_ASSERT(shown.contains("while (true) { sleep(50); log('tick'); }"));
+        TEST_ASSERT(shown.contains("first"));
+        const int ticks = int(shown.count("tick"));
+        TEST_ASSERT(TestSupport::spin([&]() { return int(details->toPlainText().count("tick")) >= ticks + 3; }));
+
+        if (auto* tabs = widget.findChild<QTabWidget*>("scripthost_scriptsTabs"))
+            tabs->setCurrentIndex(tabs->count() - 1);       // Runs
+        widget.resize(720, 620);
+        TestSupport::grab(&widget, "active_run_details.png");
+
+        engine.stop(id);
+        TEST_ASSERT(TestSupport::spin([&]() { return !ended.isEmpty(); }, 5000));
+        TEST_COMPARE(active->rowCount(), 0);
+        TEST_ASSERT(!runs->selectedItems().isEmpty());
+        TEST_ASSERT(details->toPlainText().contains(QString("Run #%1: Ticker").arg(id)));
+        TEST_ASSERT(details->toPlainText().contains("cancelled"));
+
+        // A run of the session or an active one: one is shown at a time.
+        const Engine::RunId second = engine.run("sleep(60000);", TestSupport::Options(), nullptr);
+        active->selectRow(0);
+        TEST_ASSERT(runs->selectedItems().isEmpty());
+        TEST_ASSERT(details->toPlainText().contains(QString("Run #%1").arg(second)));
+        runs->selectRow(0);
+        TEST_ASSERT(active->selectedItems().isEmpty());
+        TEST_ASSERT(details->toPlainText().contains(QString("Run #%1: Ticker").arg(id)));
+        engine.stopAll();
+        TEST_ASSERT(TestSupport::spin([&]() { return !engine.isRunning(); }, 5000));
     }
 
     // Two editors, each running its script: each sees its own run only, and
