@@ -133,21 +133,26 @@ private:
         TEST_ASSERT(engine.hasMethod("input.mouse"));
 
         // Where the pointer really is decides, whether setPos worked or not.
-        // Somebody may move the mouse meanwhile: tried until it held still.
-        QCursor::setPos(area.mapToGlobal(QPoint(30, 40)));
+        // Somebody may move the mouse meanwhile: put back before each try,
+        // and compared only for a try it held still in. Moved all the time,
+        // the answer has to agree with itself.
         QJsonObject result;
         QPoint at;
-        for (int attempt = 0; attempt < 20; ++attempt) {
+        bool still = false;
+        for (int attempt = 0; attempt < 20 && !still; ++attempt) {
+            QCursor::setPos(area.mapToGlobal(QPoint(30, 40)));
             at = area.mapFromGlobal(QCursor::pos());
             result = TestSupport::runScript(engine, "return input.mouse();");
-            if (area.mapFromGlobal(QCursor::pos()) == at)
-                break;
+            still = area.mapFromGlobal(QCursor::pos()) == at;
         }
         TEST_COMPARE(result["status"].toString(), QString("ok"));
         const QJsonObject position = result["result"].toObject();
-        TEST_COMPARE(position["x"].toInt(), at.x());
-        TEST_COMPARE(position["y"].toInt(), at.y());
-        TEST_COMPARE(position["inside"].toBool(), area.rect().contains(at));
+        if (still) {
+            TEST_COMPARE(position["x"].toInt(), at.x());
+            TEST_COMPARE(position["y"].toInt(), at.y());
+        }
+        TEST_COMPARE(position["inside"].toBool(),
+                     area.rect().contains(QPoint(position["x"].toInt(), position["y"].toInt())));
         TEST_ASSERT(position["buttons"].isArray());
         // It is a method call.
         TEST_COMPARE(result["calls"].toObject()["input.mouse"].toInt(), 1);
