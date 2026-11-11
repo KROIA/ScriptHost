@@ -298,10 +298,11 @@ limits.timeoutMs         = 300000;   // whole run, timers included; not applied 
 limits.maxCalls          = 5000;     // method calls per run; 0 = none
 limits.maxLogLines       = 200;      // the latest lines a run keeps of its log
 limits.maxConcurrentRuns = 8;        // runs at the same time; 0 = no limit
+limits.maxQueuedEvents   = 1000;     // events waiting per run; the oldest dropped when full; 0 = no limit
 engine->setLimits(limits);
 ```
 
-`timeoutMs` and `maxCalls` apply to every run that does not choose its own (`RunOptions::timeoutMs`, `maxCalls`; see [Running until stopped](#running-until-stopped)). `ScriptMethod::setMaxCallsPerRun(n)` limits one method on top of that. Every run counts for itself, from zero.
+`timeoutMs` and `maxCalls` apply to every run that does not choose its own (`RunOptions::timeoutMs`, `maxCalls`; see [Running until stopped](#running-until-stopped)). `ScriptMethod::setMaxCallsPerRun(n)` limits one method on top of that. Every run counts for itself, from zero. `maxLogLines` and `maxQueuedEvents` hold for every run, requested ones included.
 
 A script that waits, sleeps or loops without calling anything is stopped by the time limit; `try` / `catch` in the script cannot swallow that.
 
@@ -374,9 +375,9 @@ while (true) {                  // events wait until the body returns: never
 }
 ```
 
-Events are delivered in the order they were posted, and ahead of timers that are due at the same time. Each run calls its handlers on its own thread, one at a time. An event is not a method call: it does not count toward `maxCalls` and is not listed in `calls` - but what a handler calls is, and so is `input.mouse()`. An exception thrown in a handler ends the run with phase `runtime`.
+Events are delivered in the order they were posted, ahead of timers that are due - but a due timer waits for at most 64 events, then the due timers run before the next event. Each run calls its handlers on its own thread, one at a time. An event is not a method call: it does not count toward `maxCalls` and is not listed in `calls` - but what a handler calls is, and so is `input.mouse()`. An exception thrown in a handler ends the run with phase `runtime`.
 
-The queue has no limit: an application that posts faster than a script handles, say on every mouse move, delays the script's timers and fills memory. That is why mouse moves are not posted (below).
+Each run's queue holds at most `Limits::maxQueuedEvents` events (default 1000; 0 = no limit, see [Limits](#limits)). When an application posts faster than the script handles, the oldest waiting event is dropped to make room for the new one. The first drop writes one line to the run's log, `events dropped: queue full (1000)`, and the result carries the count: `"events_dropped": 12`. Mouse moves are not posted (below), so that ordinary input does not fill the queue.
 
 ### How long a run with handlers lives
 

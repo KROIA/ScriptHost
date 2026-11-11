@@ -71,6 +71,8 @@ struct ScriptRunShared
     // and not yet delivered, as (name, data as JSON text).
     QSet<QString>                 listening;
     QList<QPair<QString, QString>> events;
+    int                           maxEvents = 0;  // queued at most, the oldest dropped; 0 = no limit
+    qint64                        dropped = 0;    // events dropped so far
 };
 
 class ScriptRunner : public QThread
@@ -124,6 +126,9 @@ private:
     bool waitWhilePaused(int line, const QString& name, const QString& argsJson);
     QString variablesJson(int line);
     QJsonObject stoppedResult(const QString& reason) const;
+    void writeLog(const QString& text);
+    // The one log line about dropped events, once there are any.
+    void noteDroppedEvents();
 
     ScriptRunConfig                  m_config;
     QSharedPointer<ScriptRunShared>  m_shared;
@@ -139,6 +144,7 @@ private:
     QStringList                 m_log;          // the latest maxLogLines lines
     qint64                      m_logLines = 0;
     int                         m_callCount = 0;
+    bool                        m_droppedNoted = false;
     quint64                     m_nextId = 0;
     QString                     m_limitMessage;
     // Statement stepping.

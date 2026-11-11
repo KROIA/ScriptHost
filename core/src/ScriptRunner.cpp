@@ -198,6 +198,12 @@ void ScriptRunner::run()
     }
 
     if (!m_config.compileOnly) {
+        noteDroppedEvents();
+        {
+            QMutexLocker lock(&m_shared->mutex);
+            if (m_shared->dropped > 0)
+                result["events_dropped"] = m_shared->dropped;
+        }
         if (!m_calls.isEmpty()) {
             QJsonObject calls;
             for (auto it = m_calls.constBegin(); it != m_calls.constEnd(); ++it)
@@ -330,10 +336,15 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
 
     // The timers and the event handlers keep the run alive. Waited for like
     // sleep(), so that a stop wakes the wait at once, and so does an event.
-    // Events go first, in the order they were posted.
+    // Events go in the order they were posted, ahead of due timers - but
+    // after kEventBatch events while a timer was due, the due timers run.
+    // 64: a timer waits for at most that many handlers, and a burst of
+    // events still goes through without a timer between each.
     // ponytail: the next timer is found by a scan of all of them; a heap
     // when scripts keep thousands of timers.
     QJSValue deliver = prelude.property(QStringLiteral("deliver"));
+    const int kEventBatch = 64;
+    int batch = 0;      // events delivered in a row while a timer was due
     for (;;) {
         auto next = m_timers.begin();
         for (auto it = m_timers.begin(); it != m_timers.end(); ++it) {
@@ -341,6 +352,7 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
                 next = it;
         }
         bool hasEvent = false;
+        bool timerDue = false;
         QPair<QString, QString> event;
         {
             QMutexLocker lock(&m_shared->mutex);
@@ -351,10 +363,15 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
                 : QDeadlineTimer(qMax(qint64(0), next.value().due - m_clock.elapsed()));
             while (!m_shared->stop && m_shared->events.isEmpty() && !deadline.hasExpired())
                 m_shared->wake.wait(&m_shared->mutex, deadline);
-            hasEvent = !m_shared->events.isEmpty();
+            timerDue = !m_timers.isEmpty() && deadline.hasExpired();
+            hasEvent = !m_shared->events.isEmpty() && (batch < kEventBatch || !timerDue);
             if (hasEvent)
                 event = m_shared->events.takeFirst();
         }
+        // A timer that ran leaves the count: the other due timers follow it.
+        if (hasEvent)
+            batch = timerDue ? batch + 1 : 0;
+        noteDroppedEvents();
         if (stopRequested(&reason))
             return stoppedResult(reason);
         QJsonObject failedCall;
@@ -421,6 +438,30 @@ void ScriptRunner::clearTimer(double id)
     // Whatever number the script passes; only an id it was given counts.
     if (id >= 1 && id <= double(m_lastTimerId))
         m_timers.remove(qint64(id));
+}
+
+void ScriptRunner::writeLog(const QString& text)
+{
+    ++m_logLines;
+    m_log << text;
+    if (m_log.size() > m_config.maxLogLines)
+        m_log.removeFirst();
+    emit logged(text);
+}
+
+void ScriptRunner::noteDroppedEvents()
+{
+    if (m_droppedNoted)
+        return;
+    int max = 0;
+    {
+        QMutexLocker lock(&m_shared->mutex);
+        if (m_shared->dropped == 0)
+            return;
+        max = m_shared->maxEvents;
+    }
+    m_droppedNoted = true;
+    writeLog(QStringLiteral("events dropped: queue full (%1)").arg(max));
 }
 
 bool ScriptRunner::listen(const QString& name, bool on)
@@ -494,12 +535,7 @@ QString ScriptRunner::handleCall(const QString& name, const QString& argsJson, c
     if (method.local) {
         if (name == QLatin1String("log") || name == QLatin1String("print")
             || name == QLatin1String("console.log")) {
-            const QString text = logText(argsJson);
-            ++m_logLines;
-            m_log << text;
-            if (m_log.size() > m_config.maxLogLines)
-                m_log.removeFirst();
-            emit logged(text);
+            writeLog(logText(argsJson));
         } else if (name == QLatin1String("progress")) {
             const QJsonArray args = QJsonDocument::fromJson(argsJson.toUtf8()).array();
             emit progressed(args.at(0).toDouble(), args.at(1).toDouble(), args.at(2).toString());

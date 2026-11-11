@@ -114,6 +114,8 @@ public:
         int maxCalls          = 5000;   // method calls per run; 0 = no limit
         int maxLogLines       = 200;    // the latest lines kept of the script log
         int maxConcurrentRuns = 8;      // runs at the same time; 0 = no limit
+        int maxQueuedEvents   = 1000;   // events waiting per run (postEvent); when
+                                        // full, the oldest is dropped; 0 = no limit
     };
     void setLimits(const Limits& limits);
     Limits limits() const { return m_limits; }
@@ -262,9 +264,13 @@ public:
     // handler for `name`, or to the one run `id`; a run without one does not
     // get it, not even later. Each run calls its handlers on its own thread,
     // with `data` as a plain object, in the order the events were posted -
-    // once its body has returned, between its timers, ahead of timers that
-    // are due. An event posted while the body still runs (a loop, sleep())
-    // waits in the run's queue until the body has returned. An event is not
+    // once its body has returned, between its timers: ahead of due timers,
+    // but a due timer waits for at most 64 events. An event posted
+    // while the body still runs (a loop, sleep()) waits in the run's queue
+    // until the body has returned. The queue holds Limits::maxQueuedEvents;
+    // beyond that the oldest event is dropped, the run's log says so once
+    // ("events dropped: queue full (N)") and its result carries
+    // "events_dropped": <count>. An event is not
     // a method call and does not count toward maxCalls. A run with a
     // handler goes on running after its body returned, like one with timers,
     // until off() removed the last handler and no timer is left, it is

@@ -749,6 +749,10 @@ void queueEvent(ScriptRunShared& shared, const QString& name, const QString& jso
     QMutexLocker lock(&shared.mutex);
     if (!shared.listening.contains(name))
         return;
+    if (shared.maxEvents > 0 && shared.events.size() >= shared.maxEvents) {
+        shared.events.removeFirst();
+        ++shared.dropped;
+    }
     shared.events.append({name, json});
     shared.wake.wakeAll();
 }
@@ -891,6 +895,7 @@ ScriptEngine::RunId ScriptEngine::run(const QString& code, const RunOptions& opt
                                : options.statements ? ScriptRunShared::ToStatement
                                                     : ScriptRunShared::ToCall;
     active->shared->breakpoints = options.breakpoints;
+    active->shared->maxEvents = m_limits.maxQueuedEvents;
     active->callback = std::move(done);
     active->record.id = id;
     active->record.started = QDateTime::currentDateTime();

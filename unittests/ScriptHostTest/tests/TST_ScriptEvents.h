@@ -27,6 +27,9 @@ public:
         ADD_TEST(TST_ScriptEvents::testStopWhileWaitingForEvents);
         ADD_TEST(TST_ScriptEvents::testRequestedRunsNeedTheOptIn);
         ADD_TEST(TST_ScriptEvents::testEventsInCheckAndDefinition);
+        ADD_TEST(TST_ScriptEvents::testQueueCapDropsTheOldest);
+        ADD_TEST(TST_ScriptEvents::testUnlimitedQueue);
+        ADD_TEST(TST_ScriptEvents::testTimersRunDuringAFlood);
     }
 
 private:
@@ -59,6 +62,33 @@ private:
             out.result = r;
             out.done = true;
         });
+    }
+
+    // Posts `count` events "n" {i} while the script's body sleeps, so that
+    // they all wait in the queue; the script logs how many it got, the first
+    // and the last.
+    static Outcome flood(Engine& engine, Logs& logs, int count)
+    {
+        Outcome out;
+        const Engine::RunId id = start(engine,
+            "const seen = [];\n"
+            "on('n', d => {\n"
+            "    seen.push(d.i);\n"
+            "    if (d.i === " + QString::number(count - 1) + ") {\n"
+            "        off('n');\n"
+            "        log(seen.length + ' ' + seen[0] + ' ' + seen[seen.length - 1]);\n"
+            "    }\n"
+            "});\n"
+            "log('ready');\n"
+            "sleep(1000);\n"
+            "return 0;\n", out);
+        TestSupport::spin([&]() { return logs.ready(id); });
+        for (int i = 0; i < count; ++i)
+            engine.postEvent("n", QJsonObject{{"i", i}});
+        if (!TestSupport::spin([&]() { return out.done; }))
+            finish(engine);     // no callback may reach `out` later
+        out.result["id"] = double(id);
+        return out;
     }
 
     static void finish(Engine& engine)
@@ -346,6 +376,80 @@ private:
         const QJsonObject bad = TestSupport::runScript(engine, "on('key', 5);\nreturn 1;");
         TEST_COMPARE(bad["phase"].toString(), QString("runtime"));
         TEST_COMPARE(bad["message"].toString(), QString("TypeError: the second argument must be a function"));
+    }
+
+    // ---- the queue's cap and the timers' turn ------------------------------
+
+    TEST_FUNCTION(testQueueCapDropsTheOldest)
+    {
+        TEST_START;
+
+        Engine engine;
+        TEST_COMPARE(engine.limits().maxQueuedEvents, 1000);
+        Engine::Limits limits = engine.limits();
+        limits.maxQueuedEvents = 100;
+        engine.setLimits(limits);
+        Logs logs(engine);
+
+        const Outcome out = flood(engine, logs, 250);
+        TEST_ASSERT(out.done);
+        TEST_COMPARE(out.result["status"].toString(), QString("ok"));
+        // The newest 100 are kept, in order; the 150 before them are gone.
+        const Engine::RunId id = Engine::RunId(out.result["id"].toDouble());
+        TEST_COMPARE(logs.lines[id], (QStringList{"ready", "events dropped: queue full (100)", "100 150 249"}));
+        TEST_COMPARE(out.result["events_dropped"].toInt(), 150);
+    }
+
+    TEST_FUNCTION(testUnlimitedQueue)
+    {
+        TEST_START;
+
+        Engine engine;
+        Engine::Limits limits = engine.limits();
+        limits.maxQueuedEvents = 0;
+        engine.setLimits(limits);
+        Logs logs(engine);
+
+        const Outcome out = flood(engine, logs, 2500);
+        TEST_ASSERT(out.done);
+        const Engine::RunId id = Engine::RunId(out.result["id"].toDouble());
+        TEST_COMPARE(logs.lines[id], (QStringList{"ready", "2500 0 2499"}));
+        TEST_ASSERT(!out.result.contains("events_dropped"));
+    }
+
+    TEST_FUNCTION(testTimersRunDuringAFlood)
+    {
+        TEST_START;
+
+        Engine engine;
+        Logs logs(engine);
+        Outcome out;
+        // Each handler takes a millisecond: 400 queued events keep the run
+        // busy for 400 ms, during which the 5 ms interval is due all along.
+        const Engine::RunId id = start(engine,
+            "let ticks = 0;\n"
+            "const t = setInterval(() => ticks++, 5);\n"
+            "on('n', d => {\n"
+            "    const begin = Date.now();\n"
+            "    while (Date.now() - begin < 1) {}\n"
+            "    if (d.i === 399) {\n"
+            "        off('n');\n"
+            "        clearInterval(t);\n"
+            "        log('ticks ' + ticks);\n"
+            "    }\n"
+            "});\n"
+            "log('ready');\n"
+            "sleep(500);\n"
+            "return 0;\n", out);
+        TEST_ASSERT(TestSupport::spin([&]() { return logs.ready(id); }));
+        for (int i = 0; i < 400; ++i)
+            engine.postEvent("n", QJsonObject{{"i", i}});
+        TEST_ASSERT(TestSupport::spin([&]() { return out.done; }));
+        TEST_COMPARE(out.result["status"].toString(), QString("ok"));
+        // 400 events in batches of 64: the interval ran between them.
+        const QString last = logs.lines[id].value(1);
+        TEST_ASSERT(last.startsWith("ticks "));
+        TEST_ASSERT(last.mid(6).toInt() >= 3);
     }
 };
 
