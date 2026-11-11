@@ -220,10 +220,12 @@ public:
                                         // statement
         bool        external = false;   // for the record: started through requestRun()
         bool        readOnlyOnly = false;    // a changing method fails the script
-        int         timeoutMs = -1;     // -1 = Limits::timeoutMs, 0 = no limit
+        int         timeoutMs = -1;     // -1 = Limits::timeoutMs, 0 = no limit; not
+                                        // applied in the debugger
         int         maxCalls = -1;      // -1 = Limits::maxCalls, 0 = no limit
     };
-    // Names one run of this object; 0 is none.
+    // Names one run of this object; 0 is none. Counts up from 1 and is never
+    // given to a second run.
     using RunId = quint64;
     using RunCallback = std::function<void(const QJsonObject& result)>;
     // Starts a script. Several run at the same time, up to
@@ -248,6 +250,7 @@ public:
     bool isExternalRun(RunId id) const;
     // Ends the run soon - also while it sleeps, waits for a timer or for a
     // method, or loops in JavaScript. Its result is {"phase":"cancelled"}.
+    // Nothing happens for an id that is not active.
     void stop(RunId id);
     void stopAll();
 
@@ -280,7 +283,7 @@ public:
     void continueRun();
     void setBreakpoints(const QSet<int>& lines);
 
-    // The runs of this session, oldest first.
+    // The finished runs of this session, oldest first; the latest 100.
     struct RunRecord
     {
         RunId       id = 0;

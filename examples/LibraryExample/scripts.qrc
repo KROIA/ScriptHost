@@ -4,5 +4,6 @@
     <qresource prefix="/">
         <file>scripts/restock-low-items.js</file>
         <file>scripts/inventory-report.js</file>
+        <file>scripts/stock-monitor.js</file>
     </qresource>
 </RCC>

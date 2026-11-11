@@ -39,7 +39,9 @@ public:
     ScriptMethod& setGroup(const QString& group);
 
     // type: "string", "integer", "number", "boolean", "array", "object".
-    // Optional parameters go last; a script simply leaves them out.
+    // A parameter is required unless `required` is false (the default is
+    // true, here and in addRawParameter). Optional parameters go last; a
+    // script simply leaves them out.
     ScriptMethod& addParameter(const QString& name,
                                const QString& type,
                                const QString& description,

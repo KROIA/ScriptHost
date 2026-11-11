@@ -1,13 +1,17 @@
 # ScriptHost
 
-A Qt library that makes a C++ application scriptable in JavaScript. The application registers the methods a script may call; the user, the application itself or another program writes a script against them; ScriptHost checks it, runs it on a thread of its own and hands back the result.
+A Qt library that makes a C++ application scriptable in JavaScript. The application registers the methods a script may call; the user, the application itself or another program writes a script against them; ScriptHost checks it, runs it on a thread of its own and hands back the result. Several scripts run at the same time, and a script with timers can run until it is stopped.
 
 A script can call exactly the registered methods. The JavaScript engine (`QJSEngine`) has no file, network or process access of its own.
+
+Two libraries: **ScriptHost**, the engine (Qt Core + Qml, no GUI), and **ScriptHostWidgets** on top of it (the Scripts window, the editor with its debugger, the approval dialog).
+
+Version 2.0 breaks the 1.x API (run ids, the widgets split off); see [Migrating from 1.x to 2.0](documentation/Guide.md#migrating-from-1x-to-20).
 
 ## Quick start
 
 ```cpp
-#include "ScriptHost.h"
+#include "ScriptHost.h"          // the engine; "ScriptHostWidgets.h" adds the widgets
 
 auto* engine = new ScriptHost::ScriptEngine(this);
 
@@ -23,24 +27,29 @@ engine->registerMethod(read, [this](const QJsonObject& args) -> QJsonValue {
     return m_db.object(id);
 });
 
-engine->run("return db.readObject('a1').name;", {}, [](const QJsonObject& result) {
-    // {"status":"ok","result":"Pump","calls":{"db.readObject":1},...}
-});
+const ScriptHost::ScriptEngine::RunId id =
+    engine->run("return db.readObject('a1').name;", {}, [](const QJsonObject& result) {
+        // {"status":"ok","result":"Pump","calls":{"db.readObject":1},...}
+    });
+// engine->stop(id) ends it early.
 ```
 
-`examples/LibraryExample` is a small inventory application that uses everything below, commented in the order an application sets it up.
+`examples/LibraryExample` is a small inventory application that uses everything below, commented in the order an application sets it up, including a stock monitor that runs on a `setInterval` timer until it is stopped. `examples/ConsoleExample` uses the engine alone, in a `QCoreApplication`.
 
 ## Features
 
 - **Methods defined once**: name, description, typed parameters (ranges, enums, defaults), return example; or taken from an existing JSON schema (`ScriptMethod::fromSchema`). Every call is checked against the definition before the handler runs.
 - **Synchronous and asynchronous handlers**, run on the GUI thread; the script waits on its own thread, the application stays responsive.
 - **Checked before running**: syntax errors and calls of methods that do not exist come back with the line and a "did you mean", before anything is executed.
-- **Limits**: run time, total method calls, calls per method (`setMaxCallsPerRun`), log lines.
+- **Concurrent runs**: each `run()` returns a `RunId`; `stop(id)`, `stopAll()`, `activeRuns()`. Up to `Limits::maxConcurrentRuns` at once (default 8).
+- **Long-running scripts**: `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`. A run lives until its timers are done, it is stopped or it reaches its limit; the application can lift the limits for its own runs (`RunOptions::timeoutMs = 0`). `stop()` ends a run at once, also while it sleeps, waits or loops.
+- **Output**: `log()`, `print()` and `console.log()` lines arrive as `runLog` and, with `setOutput(device)`, on any `QIODevice` (stdout, a file, a socket).
+- **Limits**: run time, total method calls, calls per method (`setMaxCallsPerRun`), log lines, runs at once.
 - **Dry run**: read-only methods run, changing ones are only recorded.
-- **Requested runs** (`requestRun`) for other programs: a master switch, a requester name the user sees, approval by the user per kind of script (new or saved, reading or changing, dry run), with a built-in dialog (run, test run, decline with a reason) or the application's own handler.
+- **Requested runs** (`requestRun`) for other programs: a master switch, a requester name the user sees, approval by the user per kind of script (new or saved, reading or changing, dry run), through the application's own handler or the dialog of ScriptHostWidgets (`useApprovalDialog`: run, test run, decline with a reason).
 - **Saved scripts** in `.js` files with a small header; shipped read-only folders next to the user's folder.
 - **Per-method switches** and locks: what scripts may call, and what the user may change. The user's choices as JSON for the application to store.
-- **Widgets**: `ScriptsWidget` (switches, saved scripts, methods, runs of the session) and `ScriptEditorDialog` (editor with method reference, check, run, dry run, and a debugger that steps statement by statement or from method call to method call, with breakpoints and the variables at each stop).
+- **Widgets** (ScriptHostWidgets): `ScriptsWidget` (switches, saved scripts, methods, the active runs with a Stop button each, runs of the session) and `ScriptEditorDialog` (editor with method reference, check, run, dry run, and a debugger that steps statement by statement or from method call to method call, with breakpoints and the variables at each stop).
 - **Definition** of the methods as TypeScript declarations (`apiDefinition`), for the editor's reference and for programs that write scripts.
 
 The full description is in [documentation/Guide.md](documentation/Guide.md).
@@ -49,7 +58,7 @@ The full description is in [documentation/Guide.md](documentation/Guide.md).
 
 Requirements:
 
-- Qt 5.15 (primary) or Qt 6, modules **Core, Gui, Widgets, Qml**
+- Qt 5.15 (primary) or Qt 6, modules **Core, Qml** for the engine, plus **Gui, Widgets** for ScriptHostWidgets
 - CMake with presets, a C++20 compiler (developed with MSVC / Visual Studio 2022 and Ninja)
 
 With presets:
@@ -71,11 +80,19 @@ On Windows, `build.bat` does the same from a command prompt:
 .\build.bat help
 ```
 
-The library, the example and the tests are installed into `installation/`, with the Qt libraries they need. The tests are `installation/bin/ScriptHostTest.exe`; the example is `installation/bin/LibraryExample.exe`.
+The libraries, the examples and the tests are installed into `installation/`, with the Qt libraries they need. The tests are `installation/bin/ScriptHostTest.exe`; the examples are `installation/bin/LibraryExample.exe` and `installation/bin/ConsoleExample.exe`.
+
+Targets: `ScriptHost_shared` / `ScriptHost_static` (the engine) and `ScriptHostWidgets_shared` / `ScriptHostWidgets_static` (the widgets, which link the engine).
 
 ## Using it in another project
 
-ScriptHost follows the [QT_cmake_library_template](https://github.com/KROIA/QT_cmake_library_template). In a project built from the same template, copy `ScriptHost.cmake` from this repository into that project's `dependencies/` folder. On the next configure the library is fetched from GitHub and linked; `SH_LIBRARY_AVAILABLE` is defined, and `#include "ScriptHost.h"` gives all classes.
+ScriptHost follows the [QT_cmake_library_template](https://github.com/KROIA/QT_cmake_library_template). In a project built from the same template, copy `ScriptHost.cmake` from this repository into that project's `dependencies/` folder. On the next configure the library is fetched from GitHub and both libraries are linked; `SH_LIBRARY_AVAILABLE` is defined. `#include "ScriptHost.h"` gives the engine, `#include "ScriptHostWidgets.h"` the engine and the widgets.
+
+A program without windows (a service, a command-line tool) links the engine alone, without Qt Gui and Widgets:
+
+```cmake
+set(SCRIPTHOST_ENGINE_ONLY ON)    # before ScriptHost.cmake is included
+```
 
 ## License
 

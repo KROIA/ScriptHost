@@ -13,7 +13,7 @@
 // dialog, the Scripts window with its editor and debugger - comes from the
 // library. The toolbar at the end shows the three ways a script starts:
 // run() by the application, the editor by the user, requestRun() by another
-// program.
+// program - and a script that runs until it is stopped, beside the others.
 
 #include "InventoryWindow.h"
 #include <QDir>
@@ -34,6 +34,7 @@ namespace
 
 const char* const kScriptSettingsKey = "scripting/userSettings";
 const char* const kRestockScript = "Restock low items";
+const char* const kMonitorScript = "Stock monitor";
 
 // ---- Helpers for the table: the application's own data, nothing ScriptHost-specific
 
@@ -276,6 +277,8 @@ void InventoryWindow::buildToolBar()
     bar->addAction(QString("Run '%1'").arg(kRestockScript), this, [this]() { runRestock(false); });
     bar->addAction(QString("Dry run '%1'").arg(kRestockScript), this, [this]() { runRestock(true); });
     bar->addSeparator();
+    bar->addAction(QString("Start '%1'").arg(kMonitorScript), this, [this]() { startMonitor(); });
+    bar->addSeparator();
     bar->addAction("Request a script", this, [this]() { requestScript(); });
 }
 
@@ -338,6 +341,33 @@ void InventoryWindow::runRestock(bool dryRun)
         if (result["status"].toString() != "ok")
             appendLog("[run] did not work: " + result["message"].toString());
     });
+}
+
+// A script that runs until it is stopped: it sets an interval timer and
+// checks the stock on every tick. Several runs go on at once, so the toolbar
+// and the editor stay usable beside it; every run has an id (RunId), and the
+// Scripts window lists the active ones, each with a Stop button.
+void InventoryWindow::startMonitor()
+{
+    const ScriptHost::ScriptLibrary::Script script = m_library->script(kMonitorScript);
+    if (!script.isValid()) {
+        appendLog(QString("[run] there is no script '%1'").arg(kMonitorScript));
+        return;
+    }
+    ScriptHost::ScriptEngine::RunOptions options;
+    options.name = script.name;
+    options.args = QJsonObject{{"threshold", 50}, {"seconds", 5}};
+    // The engine's Limits (5 minutes, 5000 calls) would end it. The
+    // application lets its own monitor run on: 0 = no limit, -1 (the
+    // default) = the engine's. requestRun() cannot do this.
+    options.timeoutMs = 0;
+    options.maxCalls = 0;
+    const ScriptHost::ScriptEngine::RunId id = m_engine->run(script.code, options, [this](const QJsonObject& result) {
+        if (result["status"].toString() != "ok")
+            appendLog("[run] the monitor ended: " + result["message"].toString());
+    });
+    if (id != 0)
+        appendLog(QString("[run] the monitor is run #%1; stop it in Scripts..., tab Runs").arg(id));
 }
 
 // Another program asks: requestRun(). A real application would do this when

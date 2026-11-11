@@ -22,6 +22,7 @@ private:
     void openScripts();
     void newScript();
     void runRestock(bool dryRun);
+    void startMonitor();
     void requestScript();
 
     void saveScriptSettings();
