@@ -372,16 +372,18 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
     // The timers, the event handlers and the extensions (a key held with
     // setKeepAlive(), a callback scheduled) keep the run alive. Waited for
     // like sleep(), so that a stop wakes the wait at once, and so does an
-    // event, a scheduled callback or a released key. Scheduled callbacks go
-    // first, then events in the order they were posted, ahead of due timers -
-    // but after kEventBatch of them while a timer was due, the due timers
-    // run. 64: a timer waits for at most that many handlers, and a burst of
+    // event, a scheduled callback or a released key. Scheduled callbacks and
+    // events (in the order they were posted) take turns while both wait - a
+    // callback that is always pending again (a frame loop) must not starve
+    // input - and go ahead of due timers, but after kEventBatch of them while
+    // a timer was due, the due timers run. 64: a timer waits for at most that many handlers, and a burst of
     // events still goes through without a timer between each.
     // ponytail: the next timer is found by a scan of all of them; a heap
     // when scripts keep thousands of timers.
     QJSValue deliver = prelude.property(QStringLiteral("deliver"));
     const int kEventBatch = 64;
     int batch = 0;      // events delivered in a row while a timer was due
+    bool lastWasJob = false;
     for (;;) {
         auto next = m_timers.begin();
         for (auto it = m_timers.begin(); it != m_timers.end(); ++it) {
@@ -409,7 +411,7 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
             timerDue = !m_timers.isEmpty() && deadline.hasExpired();
             const bool queued = !m_shared->events.isEmpty() || !m_shared->scheduled.isEmpty();
             hasEvent = queued && (batch < kEventBatch || !timerDue);
-            if (hasEvent && !m_shared->scheduled.isEmpty())
+            if (hasEvent && !m_shared->scheduled.isEmpty() && (m_shared->events.isEmpty() || !lastWasJob))
                 job = m_shared->scheduled.takeFirst().second;
             else if (hasEvent)
                 event = m_shared->events.takeFirst();
@@ -417,6 +419,7 @@ QJsonObject ScriptRunner::execute(QJSEngine& engine)
         // A timer that ran leaves the count: the other due timers follow it.
         if (hasEvent)
             batch = timerDue ? batch + 1 : 0;
+        lastWasJob = bool(job);
         noteDroppedEvents();
         if (stopRequested(&reason))
             return stoppedResult(reason);

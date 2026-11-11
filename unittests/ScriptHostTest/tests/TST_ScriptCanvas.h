@@ -5,14 +5,19 @@
 // keeps it, a run's layer goes with the run, runs paint in start order, only
 // the frame's area is repainted, resizes reach the scripts, requested runs
 // need the opt-in, the canvas stays on top and detaches when deleted, and
-// wrong arguments throw.
+// wrong arguments throw. The extras: transforms, paths, gradients, images,
+// shapes anchored to widgets, the frame loop, the helpers and the
+// application's draw functions.
 
 #include "UnitTest.h"
 #include "TestSupport.h"
+#include <QFontMetricsF>
 #include <QImage>
 #include <QMap>
+#include <QPainter>
 #include <QPointer>
 #include <QThread>
+#include <QTimer>
 #include <QWidget>
 
 class TST_ScriptCanvas : public UnitTest::Test
@@ -34,6 +39,16 @@ public:
         ADD_TEST(TST_ScriptCanvas::testCheckAndDefinition);
         ADD_TEST(TST_ScriptCanvas::testStaysOnTop);
         ADD_TEST(TST_ScriptCanvas::testArgumentErrors);
+        ADD_TEST(TST_ScriptCanvas::testTransforms);
+        ADD_TEST(TST_ScriptCanvas::testPaths);
+        ADD_TEST(TST_ScriptCanvas::testGradients);
+        ADD_TEST(TST_ScriptCanvas::testImagesAndSprites);
+        ADD_TEST(TST_ScriptCanvas::testAnchoredShapes);
+        ADD_TEST(TST_ScriptCanvas::testWidgetRect);
+        ADD_TEST(TST_ScriptCanvas::testFrameLoop);
+        ADD_TEST(TST_ScriptCanvas::testFrameLoopCoalesces);
+        ADD_TEST(TST_ScriptCanvas::testHelpers);
+        ADD_TEST(TST_ScriptCanvas::testDrawFunctions);
     }
 
 private:
@@ -405,7 +420,7 @@ private:
         // Deleted while a run has gfx: it draws into nothing.
         delete field.canvas;
         TEST_ASSERT(!field.engine.extensions().contains("gfx"));
-        TEST_ASSERT(!field.engine.apiDefinition().contains("declare namespace gfx"));
+        TEST_ASSERT(!field.engine.apiDefinition("gfx").contains("declare namespace gfx"));
         field.engine.postEvent("draw", QJsonObject());
         field.engine.postEvent("done", QJsonObject());
         TEST_ASSERT(TestSupport::spin([&]() { return out.done; }));
@@ -442,8 +457,11 @@ private:
         const Engine::Check typo = field.engine.check("gfx.rectt(1, 2, 3, 4);");
         TEST_ASSERT(!typo.ok);
         TEST_COMPARE(typo.didYouMean, QString("gfx.rect"));
-        TEST_ASSERT(field.engine.apiDefinition().contains("declare namespace gfx"));
+        // Over the default budget: the index names it; asked for, it comes whole.
+        TEST_ASSERT(field.engine.apiDefinition().contains("gfx - an object of the application"));
         TEST_ASSERT(field.engine.apiDefinition("gfx").contains("function rects(values: number[]"));
+        field.engine.setApiBudgetChars(0);
+        TEST_ASSERT(field.engine.apiDefinition().contains("declare namespace gfx"));
     }
 
     TEST_FUNCTION(testStaysOnTop)
@@ -506,6 +524,402 @@ private:
         const QJsonObject uncaught = TestSupport::runScript(field.engine, "const a = 1;\ngfx.circle(0, 0, NaN);");
         TEST_COMPARE(uncaught["phase"].toString(), QString("runtime"));
         TEST_ASSERT(uncaught["message"].toString().contains("gfx.circle: expects numbers"));
+    }
+
+    TEST_FUNCTION(testTransforms)
+    {
+        TEST_START;
+
+        Field field;
+        Outcome out;
+        const Engine::RunId id = field.start(
+            "gfx.save();\n"
+            "gfx.translate(100, 50);\n"
+            "gfx.rotate(Math.PI / 2);\n"
+            "gfx.rect(0, 0, 40, 10, {fill: 'red', stroke: 'none'});\n"        // at (90, 50, 10, 40)
+            "gfx.restore();\n"
+            "gfx.save();\n"
+            "gfx.scale(2);\n"
+            "gfx.rect(10, 10, 10, 10, {fill: 'blue', stroke: 'none'});\n"     // at (20, 20, 20, 20)
+            "gfx.restore();\n"
+            "gfx.rect(200, 10, 10, 10, {fill: '#00ff00', stroke: 'none'});\n"
+            "gfx.translate(0, 100);\n"
+            "gfx.resetTransform();\n"
+            "gfx.rect(150, 10, 10, 10, {fill: 'blue', stroke: 'none'});\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(field.shown(id));
+        TEST_ASSERT(near(field.pixel(95, 70), Qt::red));
+        TEST_ASSERT(near(field.pixel(95, 88), Qt::red));
+        TEST_ASSERT(near(field.pixel(120, 55), white()));
+        TEST_ASSERT(near(field.pixel(105, 52), white()));
+        TEST_ASSERT(near(field.pixel(35, 35), Qt::blue));
+        TEST_ASSERT(near(field.pixel(17, 17), white()));
+        TEST_ASSERT(near(field.pixel(205, 15), Qt::green));               // restored: as it was
+        TEST_ASSERT(near(field.pixel(215, 15), white()));
+        TEST_ASSERT(near(field.pixel(155, 15), Qt::blue));                // reset
+        // The transformed bounds are repainted, not more.
+        const QRect dirty = field.presented.value(id).value(0);
+        TEST_ASSERT(dirty.contains(QRect(90, 50, 10, 40)) && dirty.contains(QRect(20, 20, 20, 20)));
+        TEST_ASSERT(QRect(10, 0, 210, 100).contains(dirty));
+    }
+
+    TEST_FUNCTION(testPaths)
+    {
+        TEST_START;
+
+        Field field;
+        Outcome out;
+        const Engine::RunId id = field.start(
+            "gfx.path().moveTo(10, 10).lineTo(60, 10).lineTo(60, 60).close().draw({fill: 'red', stroke: 'none'});\n"
+            "gfx.path().moveTo(10, 100).quadTo(50, 60, 90, 100).draw({width: 3});\n"
+            "gfx.path().moveTo(110, 100).cubicTo(110, 70, 170, 70, 170, 100).draw({width: 3});\n"
+            "gfx.path().arc(200, 60, 20, 0, Math.PI).close().draw({fill: '#00ff00', stroke: 'none'});\n"
+            "gfx.path().arc(40, 130, 15, 0, 2 * Math.PI).draw({fill: 'blue', stroke: 'none'});\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(field.shown(id));
+        TEST_ASSERT(near(field.pixel(50, 20), Qt::red));                  // filled triangle
+        TEST_ASSERT(near(field.pixel(20, 50), white()));
+        TEST_ASSERT(near(field.pixel(50, 80), Qt::black));                // quad, its middle
+        TEST_ASSERT(near(field.pixel(50, 95), white()));                  // not filled
+        TEST_ASSERT(near(field.pixel(140, 77), Qt::black));               // cubic, its middle
+        TEST_ASSERT(near(field.pixel(140, 90), white()));
+        TEST_ASSERT(near(field.pixel(200, 70), Qt::green));               // clockwise: the lower half
+        TEST_ASSERT(near(field.pixel(200, 50), white()));
+        TEST_ASSERT(near(field.pixel(40, 120), Qt::blue));                // full circle
+        TEST_ASSERT(near(field.pixel(40, 140), Qt::blue));
+        TEST_ASSERT(near(field.pixel(40, 148), white()));
+
+        const QJsonObject result = TestSupport::runScript(field.engine,
+            "const errors = [];\n"
+            "function attempt(f) { try { f(); errors.push('none'); } catch (e) { errors.push(e.message); } }\n"
+            "attempt(() => gfx.path().moveTo('a', 1).draw());\n"
+            "attempt(() => gfx.path().arc(0, 0, -1, 0, 1).draw());\n"
+            "attempt(() => gfx.path().draw());\n"
+            "attempt(() => gfx.path().lineTo(1, 1).lineTo(5, 5).draw());\n"
+            "return errors;");
+        TEST_COMPARE(result["result"].toArray(), (QJsonArray{
+            "gfx.path: expects numbers",
+            "gfx.path: an arc's radius must not be negative",
+            "none",
+            "none"}));
+    }
+
+    TEST_FUNCTION(testGradients)
+    {
+        TEST_START;
+
+        Field field;
+        Outcome out;
+        const Engine::RunId id = field.start(
+            "const across = gfx.linearGradient(10, 0, 110, 0, [[0, 'red'], [1, 'blue']]);\n"
+            "gfx.rect(10, 120, 100, 20, {fill: across, stroke: 'none'});\n"
+            "gfx.circle(180, 130, 20, {fill: gfx.radialGradient(180, 130, 20, [[0, 'white'], [1, 'black']]),\n"
+            "                          stroke: 'none'});\n"
+            "gfx.style({fill: across});\n"
+            "gfx.rect(10, 10, 100, 20, {stroke: 'none'});\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(field.shown(id));
+        TEST_ASSERT(near(field.pixel(12, 130), Qt::red));
+        TEST_ASSERT(near(field.pixel(107, 130), Qt::blue));
+        TEST_ASSERT(near(field.pixel(60, 130), QColor(127, 0, 127)));
+        TEST_ASSERT(field.pixel(180, 130).lightness() > 200);
+        TEST_ASSERT(field.pixel(180, 148).lightness() < 80);
+        TEST_ASSERT(near(field.pixel(12, 20), Qt::red));                  // through gfx.style()
+        TEST_ASSERT(near(field.pixel(107, 20), Qt::blue));
+
+        const QJsonObject result = TestSupport::runScript(field.engine,
+            "const errors = [];\n"
+            "function attempt(f) { try { f(); errors.push('none'); } catch (e) { errors.push(e.message); } }\n"
+            "attempt(() => gfx.linearGradient(0, 0, 1, 1, 'red'));\n"
+            "attempt(() => gfx.rect(0, 0, 1, 1, {fill: gfx.linearGradient(0, 0, 1, 1, [[2, 'red']])}));\n"
+            "return errors;");
+        TEST_COMPARE(result["result"].toArray(), (QJsonArray{
+            "gfx.linearGradient: stops are [[offset, colour], ...]",
+            "gfx.rect: a gradient stop's offset is 0..1"}));
+    }
+
+    TEST_FUNCTION(testImagesAndSprites)
+    {
+        TEST_START;
+
+        Field field;
+        QImage tiles(20, 10, QImage::Format_ARGB32);
+        tiles.fill(Qt::red);
+        {
+            QPainter painter(&tiles);
+            painter.fillRect(10, 0, 10, 10, Qt::blue);
+        }
+        field.canvas->addImage("tiles", tiles);
+        TEST_COMPARE(field.canvas->images(), QStringList{"tiles"});
+
+        Outcome out;
+        const Engine::RunId id = field.start(
+            "gfx.image('tiles', 10, 10);\n"
+            "gfx.image('tiles', 10, 30, 40, 20);\n"
+            "gfx.image('tiles', 10, 60, undefined, undefined, {sx: 10, sw: 10, sh: 10});\n"
+            "gfx.present();\n"
+            "log(JSON.stringify(gfx.imageSize('tiles')) + ' ' + JSON.stringify(gfx.imageSize('none')));\n"
+            "try { gfx.image('none', 0, 0); } catch (e) { log(e.message); }",
+            out);
+        TEST_ASSERT(field.shown(id));
+        TEST_ASSERT(TestSupport::spin([&]() { return field.logs.value(id).contains("ready"); }));
+        TEST_ASSERT(field.logs.value(id).contains("{\"width\":20,\"height\":10} null"));
+        TEST_ASSERT(field.logs.value(id).contains("gfx.image: no image 'none'"));
+        TEST_ASSERT(near(field.pixel(14, 15), Qt::red));                  // its own size
+        TEST_ASSERT(near(field.pixel(25, 15), Qt::blue));
+        TEST_ASSERT(near(field.pixel(32, 15), white()));
+        TEST_ASSERT(near(field.pixel(20, 40), Qt::red));                  // scaled
+        TEST_ASSERT(near(field.pixel(45, 45), Qt::blue));
+        TEST_ASSERT(near(field.pixel(15, 65), Qt::blue));                 // the sprite: its right half
+        TEST_ASSERT(near(field.pixel(25, 65), white()));
+
+        field.canvas->removeImage("tiles");
+        TEST_ASSERT(field.canvas->images().isEmpty());
+        TEST_ASSERT(near(field.pixel(14, 15), white()));
+    }
+
+    TEST_FUNCTION(testAnchoredShapes)
+    {
+        TEST_START;
+
+        Field field;
+        auto* container = new QWidget(&field.target);
+        container->setGeometry(0, 0, 240, 160);
+        auto* box = new QWidget(container);
+        box->setObjectName("box");
+        box->setGeometry(50, 50, 40, 20);
+        container->show();
+
+        Outcome out;
+        const Engine::RunId id = field.start(
+            "const box = gfx.widget('box');\n"
+            "gfx.rect(box, {fill: 'red', stroke: 'none', padding: 4});\n"
+            "gfx.arrow(10, 60, box, {stroke: 'blue', width: 2, padding: 4});\n"
+            "gfx.rect(gfx.widget('nothing'), {fill: 'red'});\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(field.shown(id));
+        TEST_ASSERT(near(field.pixel(48, 48), Qt::red));                  // padded
+        TEST_ASSERT(near(field.pixel(92, 72), Qt::red));
+        TEST_ASSERT(near(field.pixel(97, 60), white()));
+        TEST_ASSERT(near(field.pixel(25, 60), Qt::blue));                 // the arrow ends at its edge
+
+        // Follows the widget, without a present().
+        box->move(120, 90);
+        TEST_ASSERT(TestSupport::spin([&]() { return near(field.pixel(140, 100), Qt::red); }));
+        TEST_ASSERT(near(field.pixel(70, 60), white()));
+        TEST_ASSERT(near(field.pixel(170, 100), white()));
+        // ... and its parent.
+        container->move(10, 0);
+        TEST_ASSERT(TestSupport::spin([&]() { return near(field.pixel(170, 100), Qt::red); }));
+        TEST_COMPARE(field.presented.value(id).size(), 1);
+
+        // Hidden or gone: not drawn.
+        box->hide();
+        TEST_ASSERT(TestSupport::spin([&]() { return near(field.pixel(150, 100), white()); }));
+        TEST_COMPARE(field.count(QRect(0, 0, 240, 160), true), 0);
+        TEST_ASSERT(near(field.pixel(25, 60), white()));                  // the arrow too
+        box->show();
+        TEST_ASSERT(TestSupport::spin([&]() { return near(field.pixel(150, 100), Qt::red); }));
+        delete box;
+        TEST_ASSERT(TestSupport::spin([&]() { return near(field.pixel(150, 100), white()); }));
+        TEST_COMPARE(field.count(QRect(0, 0, 240, 160), true), 0);
+    }
+
+    TEST_FUNCTION(testWidgetRect)
+    {
+        TEST_START;
+
+        Field field;
+        auto* container = new QWidget(&field.target);
+        container->setGeometry(10, 0, 200, 100);
+        auto* box = new QWidget(container);
+        box->setObjectName("box");
+        box->setGeometry(50, 50, 40, 20);
+        container->show();
+
+        Outcome out;
+        const Engine::RunId id = field.start(
+            "on('ask', () => log(JSON.stringify(gfx.widgetRect('box')) + ' '\n"
+            "                    + JSON.stringify(gfx.widgetRect(gfx.widget('box'))) + ' '\n"
+            "                    + JSON.stringify(gfx.widgetRect('nothing'))));",
+            out);
+        TEST_ASSERT(TestSupport::spin([&]() { return field.logs.value(id).contains("ready"); }));
+        field.engine.postEvent("ask", QJsonObject());
+        const QString at = "{\"x\":60,\"y\":50,\"width\":40,\"height\":20}";
+        TEST_ASSERT(TestSupport::spin([&]() { return field.logs.value(id).contains(at + " " + at + " null"); }));
+
+        box->hide();
+        field.engine.postEvent("ask", QJsonObject());
+        TEST_ASSERT(TestSupport::spin([&]() { return field.logs.value(id).contains("null null null"); }));
+    }
+
+    TEST_FUNCTION(testFrameLoop)
+    {
+        TEST_START;
+
+        Field field;
+        Outcome out;
+        // No other handler: only the frame handler keeps it running.
+        const Engine::RunId id = field.engine.run(
+            "let frames = 0;\n"
+            "gfx.onFrame(dt => {\n"
+            "    if (typeof dt !== 'number' || !(dt >= 0)) log('bad dt ' + dt);\n"
+            "    gfx.clear();\n"
+            "    gfx.rect(10 + frames * 10, 10, 8, 8, {fill: 'red', stroke: 'none'});\n"
+            "    gfx.present();\n"
+            "    if (++frames === 5) { gfx.offFrame(); log('frames done'); }\n"
+            "});\n"
+            "log('started');",
+            Options(), [&out](const QJsonObject& r) {
+                out.result = r;
+                out.done = true;
+            });
+        TEST_ASSERT(TestSupport::spin([&]() { return out.done; }));
+        TEST_COMPARE(out.result["status"].toString(), QString("ok"));
+        TEST_COMPARE(field.logs.value(id), (QStringList{"started", "frames done"}));
+        TEST_ASSERT(!field.presented.value(id).isEmpty());
+        // Nothing has a frame handler: the timer stops.
+        auto* timer = field.canvas->findChild<QTimer*>();
+        TEST_ASSERT(timer != nullptr);
+        TEST_ASSERT(TestSupport::spin([&]() { return !timer->isActive(); }));
+
+        // offFrame() from outside a frame; onFrame() wants a function.
+        const QJsonObject result = TestSupport::runScript(field.engine,
+            "gfx.onFrame(() => {});\n"
+            "gfx.offFrame();\n"
+            "try { gfx.onFrame(5); } catch (e) { return e.message; }");
+        TEST_COMPARE(result["result"].toString(), QString("gfx.onFrame: expects a function"));
+    }
+
+    TEST_FUNCTION(testFrameLoopCoalesces)
+    {
+        TEST_START;
+
+        Field field;
+        Outcome out;
+        // Four slow frames, then fast ones. Ticks missed meanwhile are not
+        // queued: no burst of frames right after each other follows.
+        const Engine::RunId id = field.engine.run(
+            "let n = 0;\n"
+            "const dts = [];\n"
+            "gfx.onFrame(dt => {\n"
+            "    ++n;\n"
+            "    if (n > 1) dts.push(dt);\n"
+            "    if (n <= 4) { const end = Date.now() + 60; while (Date.now() < end) {} }\n"
+            "    if (n === 12) {\n"
+            "        gfx.offFrame();\n"
+            "        log('tiny ' + dts.filter(d => d < 1).length);\n"
+            "    }\n"
+            "});",
+            Options(), [&out](const QJsonObject& r) {
+                out.result = r;
+                out.done = true;
+            });
+        TEST_ASSERT(TestSupport::spin([&]() { return out.done; }, 10000));
+        TEST_COMPARE(out.result["status"].toString(), QString("ok"));
+        const QStringList logs = field.logs.value(id);
+        TEST_COMPARE(logs.size(), 1);
+        TEST_ASSERT(logs.value(0).startsWith("tiny "));
+        TEST_ASSERT(logs.value(0).mid(5).toInt() <= 3);
+    }
+
+    TEST_FUNCTION(testHelpers)
+    {
+        TEST_START;
+
+        Field field;
+        const QJsonObject hits = TestSupport::runScript(field.engine,
+            "return [gfx.pointInRect(5, 5, 0, 0, 10, 10), gfx.pointInRect(10, 5, 0, 0, 10, 10),\n"
+            "        gfx.pointInCircle(3, 4, 0, 0, 5), gfx.pointInCircle(4, 4, 0, 0, 5),\n"
+            "        gfx.rectsOverlap(0, 0, 10, 10, 9, 9, 5, 5), gfx.rectsOverlap(0, 0, 10, 10, 10, 0, 5, 5),\n"
+            "        gfx.circlesOverlap(0, 0, 5, 8, 0, 3), gfx.circlesOverlap(0, 0, 5, 9, 0, 3)];");
+        TEST_COMPARE(hits["result"].toArray(), (QJsonArray{true, false, true, false, true, false, true, false}));
+
+        const QJsonObject eased = TestSupport::runScript(field.engine,
+            "const t = gfx.tween(0, 100, 1000, 'inQuad');\n"
+            "const a = t.step(500);\n"
+            "const b = t.step(600);\n"
+            "const done = t.done;\n"
+            "t.reset();\n"
+            "const own = gfx.tween(10, 20, 100, k => 0.5);\n"
+            "return [gfx.ease.outQuad(0.5), gfx.ease.linear(0.3), a, b, done, t.value, t.done, own.step(10)];");
+        TEST_COMPARE(eased["result"].toArray(), (QJsonArray{0.75, 0.3, 25, 100, true, 0, false, 15}));
+
+        // Measured on the run's thread like on the GUI thread.
+        const QJsonObject measured = TestSupport::runScript(field.engine,
+            "return gfx.measureText('Hello', {size: 20, bold: true});");
+        QFont font;
+        font.setPixelSize(20);
+        font.setBold(true);
+        const QFontMetricsF metrics(font);
+        const QJsonObject size = measured["result"].toObject();
+        TEST_ASSERT(qAbs(size["width"].toDouble() - metrics.horizontalAdvance("Hello")) < 0.5);
+        TEST_ASSERT(qAbs(size["height"].toDouble() - metrics.height()) < 0.5);
+        TEST_ASSERT(qAbs(size["ascent"].toDouble() - metrics.ascent()) < 0.5);
+
+        TEST_ASSERT(field.engine.check("gfx.ease.outQuad(0.5);\ngfx.tween(0, 1, 100).step(16);").ok);
+        const Engine::Check typo = field.engine.check("gfx.ease.outQaud(0.5);");
+        TEST_ASSERT(!typo.ok);
+        TEST_COMPARE(typo.didYouMean, QString("gfx.ease.outQuad"));
+        const QJsonObject wrong = TestSupport::runScript(field.engine,
+            "try { gfx.tween(0, 1, 100, 'wobble'); } catch (e) { return e.message; }");
+        TEST_COMPARE(wrong["result"].toString(), QString("gfx.tween: no easing 'wobble'"));
+    }
+
+    TEST_FUNCTION(testDrawFunctions)
+    {
+        TEST_START;
+
+        Field field;
+        int changes = 0;
+        QObject::connect(&field.engine, &Engine::methodsChanged, [&changes]() { ++changes; });
+        auto square = [](const QVariantList& a) {
+            return QRectF(a.value(0).toDouble(), a.value(1).toDouble(), a.value(2).toDouble(), a.value(2).toDouble());
+        };
+        field.canvas->addDrawFunction(
+            "square", [square](QPainter& painter, const QVariantList& args) { painter.drawRect(square(args)); },
+            "function square(x: number, y: number, size: number): void;", square);
+        TEST_ASSERT(changes >= 1);
+        TEST_COMPARE(field.canvas->drawFunctions(), QStringList{"square"});
+        TEST_ASSERT(field.engine.check("gfx.draw.square(1, 2, 3);").ok);
+        const Engine::Check typo = field.engine.check("gfx.draw.sqare(1, 2, 3);");
+        TEST_ASSERT(!typo.ok);
+        TEST_COMPARE(typo.didYouMean, QString("gfx.draw.square"));
+        TEST_ASSERT(field.engine.apiDefinition("gfx").contains("function square(x: number, y: number, size: number)"));
+
+        // Painted with the run's style and transform; only its bounds repainted.
+        Outcome out;
+        const Engine::RunId id = field.start(
+            "gfx.style({fill: 'red', stroke: 'none'});\n"
+            "gfx.translate(10, 0);\n"
+            "gfx.draw.square(20, 20, 10);\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(field.shown(id));
+        TEST_ASSERT(near(field.pixel(35, 25), Qt::red));
+        TEST_ASSERT(near(field.pixel(25, 25), white()));
+        const QRect dirty = field.presented.value(id).value(0);
+        TEST_ASSERT(dirty.contains(QRect(30, 20, 10, 10)));
+        TEST_ASSERT(QRect(25, 15, 20, 20).contains(dirty));
+
+        // Without bounds: all of the canvas. Without a declaration: any arguments.
+        field.canvas->addDrawFunction("blob", [](QPainter&, const QVariantList&) {}, QString());
+        TEST_ASSERT(field.engine.apiDefinition("gfx").contains("function blob(...args: any[]): void;"));
+        Outcome blob;
+        const Engine::RunId other = field.start("gfx.draw.blob(1, 'two', [3]);\ngfx.present();", blob);
+        TEST_ASSERT(field.shown(other));
+        TEST_ASSERT(field.presented.value(other).value(0).contains(field.canvas->rect()));
+
+        // Not an identifier: refused.
+        field.canvas->addDrawFunction("not a name", [](QPainter&, const QVariantList&) {}, QString());
+        field.canvas->removeDrawFunction("square");
+        TEST_COMPARE(field.canvas->drawFunctions(), QStringList{"blob"});
+        TEST_ASSERT(!field.engine.check("gfx.draw.square(1, 2, 3);").ok);
+        TEST_ASSERT(!field.engine.apiDefinition("gfx").contains("function square"));
     }
 };
 
