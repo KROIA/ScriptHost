@@ -7,6 +7,7 @@
         <file>scripts/stock-monitor.js</file>
         <file>scripts/input-logger.js</file>
         <file>scripts/highlight-widget.js</file>
+        <file>scripts/highlight-lowest-stock.js</file>
         <file>scripts/paddle-game.js</file>
         <file>scripts/print-widget-tree.js</file>
         <file>scripts/rearrange-window.js</file>

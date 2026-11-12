@@ -649,6 +649,48 @@ The rules:
 - Shapes on widgets ignore the transform.
 - `gfx.widgetRect(name)` returns the rectangle at the moment of the call. It asks the GUI thread and waits for the answer: call it once, or on `"resize"`, not for every frame.
 
+### Item anchors
+
+A shape can also sit on a part of a widget: a table cell, a tab, a slider's handle, a word in a field. In place of the widget comes an object: the widget, by objectName or by an id from `ui`, and the item's `ref` as [`ui.items()`](#items-and-their-refs) gives it:
+
+```js
+const cell = {widget: 'inventoryTable', row: 4, column: 1};
+gfx.rect(cell, {stroke: 'red', width: 3});
+gfx.text({widget: 'mainTabs', index: 2}, '!', {fill: 'red', align: 'right'});
+gfx.rect({widget: 'customerName', text: {from: 0, to: 5}}, {fill: '#40ffd000'});
+gfx.present();
+```
+
+| Anchor | On |
+|---|---|
+| `{widget, row, column}` | A cell of a table or a view; `{widget, row}` a row of a list |
+| `{widget, path, column}` | An item of a tree: `path` is the row, then the row below, ... |
+| `{widget, section}` | A section of a header |
+| `{widget, index}` | A tab, a toolbox page's button, an action of a menu or tool bar; in a `QGraphicsView`, the graphics item with that id |
+| `{widget, part}` | A part the style draws: `"handle"`, `"up"`, `"vertical.slider"`, ... |
+| `{widget, text: {from, to}}` | A range of the widget's text, as [`ui.textGeometry()`](#text) finds it. A range over several lines gets one shape around all of them |
+| `{widget}` | The whole widget, as `gfx.widget()` |
+
+Every shape and `gfx.widgetRect()` take an anchor where they take a widget. An unknown field ends the run with a `TypeError` at the call (`gfx.rect: an anchor has no 'rows'`); a ref that the widget does not have draws nothing.
+
+**Where.** The place is worked out when the canvas paints, from where the item is now, as `ui` finds it. The shape follows scrolling, column resizing, sorting, zooming, splitters and window moves without a new `present()`.
+
+**Repainting.** The canvas watches the anchored widget and its viewport: their paints (a scroll, a new value, a layout change all repaint them), and moves, resizes, shows and hides of the widget and its parents. It then works the anchors out again, once, after the events, and repaints only when a place changed. Nothing is polled.
+
+**`clip`.** By default (`clip: true`) a shape on an item is cut where the item is cut: at the view's viewport, the scroll areas around it and the window. A cell half scrolled out shows half its frame. `clip: false` draws the whole shape, also over the header or the scroll bar. Arrows are never cut.
+
+**When nothing is drawn.** The shape is left out, and comes back when the item does, while:
+
+- the item is gone (a removed row, a deleted graphics item) or out of view (scrolled away, below a collapsed row, an action in the tool bar's overflow);
+- the widget or one of its ancestors is hidden, or the widget is not in the target's window;
+- scripts cannot see the widget: hidden with `ScriptUi::hideWidget()` or one of ScriptHost's own.
+
+**Menus and popups.** A menu, a context menu or a combo box's open list is a window of its own, and a canvas draws only in the window of its target. A shape anchored to them is not drawn. To draw on a popup, the application attaches a canvas to that window.
+
+**Ids.** `{widget: 17}` names the widget with that id from `ui`. The canvas reads the id the widget was given, so it works also where this engine has no `exposeWidgets()`: an id handed over by another program or another engine. A widget that never had an id cannot be named by one.
+
+`examples/LibraryExample` ships `highlight-lowest-stock.js` (the tool bar's "Start 'Highlight the lowest stock'"): it finds the lowest quantity with `ui.items()` and frames that cell with an item anchor until the run is stopped.
+
 ### The frame loop
 
 ```js
@@ -750,6 +792,7 @@ The numbers come from the test `TST_ScriptCanvas::testBenchmark` (it prints them
 - **One canvas per engine.** A second canvas attached to the same engine takes `gfx` over for new runs.
 - **Text is one line**: no wrapping, no `maxWidth`. `measureText` tells a script how wide a line is.
 - **Native child widgets**: the canvas is a sibling widget, and cannot paint over a native child (a `QOpenGLWidget` in native mode, an embedded native window). Over such a widget it stays empty.
+- **Item anchors in other windows**: menus and popups need a canvas of their own (see [Item anchors](#item-anchors)).
 - **The definition budget.** The declaration of `gfx` is longer than the default `setApiBudgetChars()` (6000), so `apiDefinition()` without a query shows `gfx` as one index line. A program that writes scripts (an assistant, a remote client) should ask for `apiDefinition("gfx")`, which comes whole, or the application raises the budget.
 
 ## Extensions: objects of your own
@@ -877,7 +920,7 @@ ui.setProperty(ok.id, 'text', 'Apply');
 setTimeout(() => ui.restore(), 3000);        // as it was, three seconds later
 ```
 
-The tools are ordinary [methods](#the-methods-a-script-can-call) named `ui.*`, in the group `UI`. They are checked against their definitions, count toward the call limits, appear in the Scripts window and in the definition, and each can be switched off on its own (see [Switching functions off](#switching-functions-off)). The reading tools are read-only; the others are not, which matters for [dry runs](#dry-run) and for [approval](#approval).
+The 40 tools are ordinary [methods](#the-methods-a-script-can-call) named `ui.*`, in the group `UI`. They are checked against their definitions, count toward the call limits, appear in the Scripts window and in the definition, and each can be switched off on its own (see [Switching functions off](#switching-functions-off)). The reading tools are read-only; the others are not, which matters for [dry runs](#dry-run) and for [approval](#approval).
 
 One `ScriptUi` serves one engine: calling `exposeWidgets()` again on the same engine moves the `ui` methods to the new root. Deleting the `ScriptUi` unregisters them. Like the engine, it is used on the GUI thread only.
 
@@ -907,6 +950,8 @@ Most tools return a node:
 | `name` | Its objectName; may be empty |
 | `class` | Its class, as its meta-object names it (`QPushButton`). A subclass without `Q_OBJECT` reports its base class |
 | `rect` | `{x, y, width, height}`, in the root's coordinates |
+| `visibleRect`, `clipped` | The part of `rect` that is shown, or null; `clipped` when that is not all of it. See [What is really visible](#what-is-really-visible) |
+| `window` | Only for a widget in another window than the root's: that window's id |
 | `visible`, `enabled` | |
 | `focus` | It is the focus widget of its window |
 | `text` | Only when the widget has one and scripts may read it (see [Privacy](#privacy-passwords-and-text)): its `text`, `title`, `plainText` or `currentText` property, or a window's title |
@@ -923,7 +968,13 @@ Children come in the order of `QObject::children()`. That is the stacking order,
 | `ui.parent(widget)` | The parent's node; null for the root |
 | `ui.find({name?, class?, text?, exact?})` | The nodes that match every criterion given, in tree order. `name` and `text` match as a substring, ignoring case, or exactly with `exact: true`. `class` matches by inheritance: `"QAbstractButton"` also finds push buttons |
 | `ui.at(x, y)` | The node of the shown widget under the point (root coordinates); null outside the root |
-| `ui.info(widget)` | The node plus `geometry` (in the parent's coordinates), `sizeHint`, `minimumSizeHint`, `minimumSize`, `maximumSize`, `sizePolicy` and `toolTip`. Also the layout the widget sits in (`parentLayout`) and its own layout (`layout`): type, spacing, margins and items, each with its index and stretch, its row, column and spans, or its form row and role |
+| `ui.items(widget, range?)` | The items of a view, tab bar, menu, tool bar or graphics view, or the parts of a slider, spin box, scroll bar, ...: each with its `ref` and rectangles. See [Positions inside widgets](#positions-inside-widgets) |
+| `ui.itemAt(x, y)` | The widget with items under the point, and its item there |
+| `ui.textGeometry(widget, {from?, to?}?)` | Where the text, the cursor and the selection of a text field or label are |
+| `ui.popups()` | The open menus, combo lists, popups and tool tip of the root |
+| `ui.map(widget?, pointOrRect, from, to)` | A point or rectangle from one coordinate space to another: `widget`, `root`, `window`, `frame`, `screen` |
+| `ui.window(widget?)` | The widget's top-level window: title, geometry, state and screen |
+| `ui.info(widget)` | The node plus `geometry` (in the parent's coordinates), `sizeHint`, `minimumSizeHint`, `minimumSize`, `maximumSize`, `sizePolicy` and `toolTip`. Also the layout the widget sits in (`parentLayout`) and its own layout (`layout`): type, spacing, margins and items, each with its index and stretch, its row, column and spans, or its form row and role. Also `covered` and `coveredBy` (other windows over it) and, for a scroll area, `scroll` |
 | `ui.property(widget, name)` | A readable `Q_PROPERTY`, as JSON |
 | `ui.focused()` | The node of the focus widget, or null |
 | `ui.tabOrder(widget?)` | The nodes of the widget's window (default: the root's window) that take the focus by Tab, in tab order |
@@ -1144,6 +1195,121 @@ In a dry run `ui.create()` makes nothing and answers with its example, `{id: -1,
 | `look-up-item.js` | A dialog with a line edit and OK/Cancel from one `ui.create()`, `ui.exec()`, and the answer used for `inventory.get()` |
 
 The example hides its Scripts window frame with `hideWidget()`; the panel inside it is hidden anyway as ScriptHost's own.
+
+## Positions inside widgets
+
+A node gives a widget's rectangle. Scripts that point at, check or draw on what lies inside a widget - a table cell, a tab, a menu entry, a slider's handle, a word in a text field, an item of a graphics scene - use the tools of this section. They are read-only `ui` tools like the others: checked, counted, and each one can be switched off on its own (`engine->setMethodEnabled("ui.items", false)`). The canvas finds the same places for its [item anchors](#item-anchors), so a highlight lands where `ui` said the item is.
+
+```js
+// The cell of the lowest quantity, in column 1 of every row.
+const cells = ui.items('inventoryTable', {all: true, columns: [1, 1]}).items;
+const lowest = cells.reduce((a, b) => Number(b.text) < Number(a.text) ? b : a);
+log(JSON.stringify(lowest.ref) + ' at ' + JSON.stringify(lowest.visibleRect));   // {"row":4,"column":1} at {...}
+```
+
+### Items and their refs
+
+`ui.items(widget, range?)` lists the parts of a widget: `{kind, items: [...], truncated?}`, plus fields of its kind. Every item has a `ref`, its `rect` and its `visibleRect`, both in root coordinates and null when the item is not laid out or not seen. The `ref` names the item: a script keeps it, finds the item again in a later answer, and hands it to the canvas. A widget without items is refused (`a QPushButton has no items`).
+
+| Widget | `kind` | `ref` | The item's other fields |
+|---|---|---|---|
+| `QTableView`, `QTableWidget` | `table` | `{row, column}` | `text`, `selected`, `current`, `enabled`, `checked` (true, false or `"partial"`; only when it can be checked) |
+| `QTreeView`, `QTreeWidget` | `tree` | `{path: [row, row below, ...], column}` | as a table, and `hasChildren`, `expanded` |
+| `QListView`, `QListWidget` | `list` | `{row}` | as a table |
+| Another `QAbstractItemView` | `view` | `{row, column}` | as a table |
+| `QHeaderView` | `header` | `{section}` | `text` |
+| `QTabBar`, `QTabWidget` | `tabs` | `{index}` | `text`, `current`, `enabled`, `tooltip` |
+| `QToolBox` (its page buttons) | `toolbox` | `{index}` | as tabs |
+| `QMenuBar`, `QMenu` | `menu` | `{index}` | `text`, `shortcut`, `enabled`, `visible`, `checkable`, `checked`, `separator`, `submenu` |
+| `QToolBar` | `toolbar` | `{index}`; the extension button `{part: "extension"}` | as a menu, and `widget` (the id of the action's button) and `inOverflow` (it does not fit and sits in the extension's menu) |
+| `QSlider` | `parts` | `{part}`: `"groove"`, `"handle"` | |
+| `QScrollBar` | `parts` | `"addLine"`, `"subLine"`, `"addPage"`, `"subPage"`, `"slider"` | |
+| `QSpinBox`, `QDoubleSpinBox` | `parts` | `"up"`, `"down"`, `"edit"` | |
+| `QComboBox` | `parts` | `"arrow"`, `"edit"` | |
+| `QGroupBox` | `parts` | `"checkbox"`, `"label"` | |
+| `QDockWidget` | `parts` | `"title"`, `"close"`, `"float"` | |
+| Another scroll area (`QTextEdit`, `QScrollArea`, ...) | `parts` | its shown scroll bars: `"vertical.slider"`, `"horizontal.addPage"`, ... | |
+| `QGraphicsView` | `graphics` | `{index}`: the item's id | see [Graphics View](#graphics-view) |
+
+`{index}` is a position - the third tab, the fifth action - except in a `QGraphicsView`, where it is an id that stays with the item. A tab moved to another place has another index; a graphics item keeps its id.
+
+An item view's answer also has `visibleRows` and `visibleColumns` (`[first, last]` in view, or null), `scroll` (`{x, y, maxX, maxY}`: the scroll bars' values, in pixels or in items by the view's scroll mode), and for a table or a tree `headers`: its shown headers, `[{widget, orientation, items}]`, each as `ui.items(header)` lists it.
+
+**Which items.** Without a range, an item view lists the items in view; a tree the rows shown, below expanded rows only. The range picks model rows and columns instead:
+
+- `{rows: [first, last]}`, `{columns: [first, last]}`: those rows or columns. In a tree, `rows` counts the top-level rows and takes their expanded part along; for a header, the range runs along it.
+- `{all: true}`: every row or column not given as a range; in a tree also below collapsed rows, which come with `rect: null`.
+
+An answer holds at most 5000 items. Beyond that it ends with `truncated: true`: the script asks for the next range.
+
+### The item at a point
+
+`ui.itemAt(x, y)` (root coordinates) returns `{widget: node, item?}`: from the widget under the point up, the nearest widget with items, and its item there as `ui.items()` lists it. Where there is no item - an empty part of a view, a plain button - it returns the node `ui.at(x, y)` gives, with no `item`. Outside the root it returns null. On a slider, the handle wins over the groove: of the parts at the point, the smallest.
+
+### Text
+
+`ui.textGeometry(widget, {from?, to?}?)` tells where the text of a `QLineEdit`, `QTextEdit`, `QPlainTextEdit` or `QLabel` (plain text) is:
+
+```js
+const g = ui.textGeometry('customerName', {from: 0, to: 5});
+// {length, cursor: {index, rect}, selection: {from, to, rects, text}, range: {from, to, rects, text}}
+```
+
+Positions are character indexes; in a `QTextEdit` each paragraph ends with one. `rects` has one rectangle per line, in root coordinates, not cut to what is seen. `range` is there when `from` or `to` is given (default 0 and the end); an empty range gives the caret at that place, 1 pixel wide. A label has no `cursor`. A password field gives the rectangles but no `text`, and with `setTextReadable(false)` no field has text.
+
+### Popups
+
+`ui.popups()` lists the open popups that belong to the root. Each is a window of its own:
+
+| `kind` | |
+|---|---|
+| `combo` | A combo box's open list: `{widget, combo, view}`. Its entries: `ui.items(view)` |
+| `menu` | An open menu or context menu: `{widget, opener?}`. Its actions: `ui.items(widget.id)` |
+| `popup` | Another popup window of the root: `{widget}` |
+| `tooltip` | The tool tip shown: `{rect, text?}` |
+
+A menu belongs to the root when its parent chain leads into the root, or when it was opened from a menu bar or menu of the root. The visibility rules apply to popups as to every widget.
+
+### Coordinates and windows
+
+Rectangles are in root coordinates unless a tool says otherwise. `ui.map(widget?, pointOrRect, from, to)` converts a point `{x, y}` or a rectangle `{x, y, width, height}` and returns the same shape:
+
+| Space | |
+|---|---|
+| `widget` | The widget given (needs one) |
+| `root` | The root widget |
+| `window` | The widget's top-level window - the root's when no widget is given - without its frame |
+| `frame` | That window with its frame |
+| `screen` | The desktop, in logical pixels |
+
+```js
+const onScreen = ui.map(null, {x: 10, y: 20}, 'root', 'screen');
+const inButton = ui.map('okButton', onScreen, 'screen', 'widget');
+```
+
+`ui.window(widget?)` describes the top-level window of a widget (default: the root's): `{id, title, geometry, frameGeometry, active, minimized, maximized, fullScreen, modal, screen: {name, geometry, availableGeometry, devicePixelRatio, logicalDpi}}`, with the geometries in screen coordinates. `id` is null for a window scripts do not see. A node of a widget in another window than the root's - a dialog, a popup - carries `window`: that window's id. Its `rect` is still in root coordinates, through the screen.
+
+### What is really visible
+
+Every node has `visibleRect` and `clipped`. `visibleRect` is the part of `rect` that the widget's ancestors leave, up to its window: scroll areas, item viewports, splitters, the window's edge. It is null when nothing of the widget is shown, also on a tab page that is not the current one. `clipped` is true when `visibleRect` is not the whole widget. Items have a `visibleRect` of their own, by the same rule.
+
+Other windows are not part of that. `ui.info(widget)` adds `covered`: whether another window of the application lies over the widget's `visibleRect`; when it does, `coveredBy` lists the ids of those windows that scripts see. On Windows the stacking order comes from the window system. On other platforms it is a guess: the active window, popups, stay-on-top and owned windows count as on top. For a scroll area, `ui.info` also gives `scroll` (`{x, y, maxX, maxY}`).
+
+### Graphics View
+
+`ui.items(view)` on a `QGraphicsView` lists the scene's items in view, topmost first, or with `{all: true}` every item of the scene, each `{ref: {index}, type, className?, sceneRect, rect, visibleRect, z, visible, enabled, selected, tooltip?, data0?}`, plus the view's `scroll`. `type` is the item's kind (`"rect"`, `"text"`, `"pixmap"`, ... or `"user<n>"`), `className` the class of a `QGraphicsObject`, `sceneRect` its bounds in scene coordinates, `data0` its `data(0)`. `ui.itemAt` finds the topmost item at a point.
+
+The id in `{index}` is given to an item the first time a tool lists it, and stays its own while it lives. Ids are never given twice, so the ref of a deleted item names nothing rather than a new item at the same place.
+
+### Limits
+
+- **Graphics item ids** are kept in the item: `QGraphicsItem::setData(0x53480001, id)`, and the scene's last id in its dynamic property `scripthost_lastItemId`. An application must not use that data key for its own data.
+- **The tool tip** does not tell which widget it belongs to. `ui.popups()` counts it as the root's when it lies on the root or within 16 pixels of it.
+- **Label text positions** are approximate: a label's text is laid out as `QPainter::drawText` would, without its `indent()` and the indent of a framed label, so the rectangles can be a few pixels off there.
+- **Popups are not hit**: `ui.at` and `ui.itemAt` look at the root's window only. To find an entry of an open menu or combo list, list it with `ui.popups()` and `ui.items()`.
+- **Coverage** knows only the application's own windows. Another program's window over the application is not seen, and outside Windows the stacking order is a guess.
+- **A list view** finds its rows in view by going over all rows: fast for thousands of rows, slower for hundreds of thousands.
+- **Text in a big document**: a block of a `QTextEdit` that is not laid out yet gives no rectangles.
 
 ## Requested runs
 
@@ -1441,6 +1607,16 @@ Every `run*` signal names its run first.
 | `runPaused(id, line, method, arguments, variables)`, `runCallFinished(id, line, method, arguments, value, error)` | Debugger |
 | `runsChanged()` | `runs()` changed |
 | `enabledChanged(bool)`, `methodsChanged()`, `settingsChanged()` | Switches and locks |
+
+## New in 2.4
+
+2.4 lets scripts find and mark what lies inside a widget:
+
+- [Positions inside widgets](#positions-inside-widgets): `ui.items()` lists the cells, rows, tabs, actions, style parts and graphics items of a widget, each with a `ref` and its rectangles; `ui.itemAt()`, `ui.textGeometry()` and `ui.popups()` find items, text and open popups; `ui.map()` and `ui.window()` convert coordinates and describe windows.
+- Nodes carry `visibleRect` and `clipped`, and `window` for a widget in another window; `ui.info()` adds `covered`, `coveredBy` and `scroll`. See [What is really visible](#what-is-really-visible).
+- [Item anchors](#item-anchors): canvas shapes on a cell, a tab, a part or a range of text, `{widget, ...ref}`, which follow scrolling and resizing and are cut where the view cuts the item (`clip`).
+
+The `ui` methods are now 40. Nothing changes for existing scripts.
 
 ## New in 2.3
 

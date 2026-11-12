@@ -45,6 +45,7 @@ const char* const kRestockScript = "Restock low items";
 const char* const kMonitorScript = "Stock monitor";
 const char* const kInputScript = "Input logger";
 const char* const kHighlightScript = "Highlight a widget";
+const char* const kLowestScript = "Highlight the lowest stock";
 const char* const kGameScript = "Paddle game";
 const char* const kRearrangeScript = "Rearrange the window";
 const char* const kLookUpScript = "Look up an item";
@@ -396,6 +397,8 @@ void InventoryWindow::buildToolBar()
     bar->addAction("Highlight the input area", this, [this]() {
         runUntilStopped(kHighlightScript, QJsonObject{{"widget", "scriptInput"}});
     });
+    // A cell, not a widget: an item anchor follows the table's scrolling.
+    bar->addAction(QString("Start '%1'").arg(kLowestScript), this, [this]() { runUntilStopped(kLowestScript); });
     bar->addAction(QString("Start '%1'").arg(kGameScript), this, [this]() {
         runUntilStopped(kGameScript);
         m_field->setFocus();    // the keys go to the field
