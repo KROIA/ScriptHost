@@ -1,5 +1,8 @@
 #include "ScriptUi.h"
+#include "ItemGeometry.h"
 #include "ScriptEngine.h"
+#include "ScriptUiSupport.h"
+#include <QAbstractScrollArea>
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCheckBox>
@@ -51,17 +54,16 @@ const char* const kOwner = "scripthost_scriptUi";
 const char* const kId = "scripthost_id";
 const char* const kHidden = "scripthost_hidden";
 
-const char* const kMethods[] = {"ui.root", "ui.tree", "ui.children", "ui.parent", "ui.find", "ui.at",
-                                "ui.info", "ui.property", "ui.focused", "ui.tabOrder",
-                                "ui.move", "ui.resize", "ui.setGeometry", "ui.show", "ui.hide", "ui.setEnabled",
-                                "ui.raise", "ui.lower", "ui.setFocus", "ui.setTabOrder", "ui.setCurrentIndex",
-                                "ui.setLayout", "ui.setStretch", "ui.setSplitterSizes", "ui.moveToLayout",
-                                "ui.reorder", "ui.setProperty", "ui.restore",
-                                "ui.create", "ui.exec", "ui.close", "ui.destroy", "ui.connect", "ui.disconnect"};
-
 // The classes ui.setCurrentIndex() takes; each has the properties
 // "currentIndex" and "count".
 const char* const kIndexed[] = {"QTabWidget", "QStackedWidget", "QComboBox", "QTabBar", "QToolBox"};
+
+} // namespace
+
+// ------------------------------------------------------------ shared by the ScriptUi files
+
+namespace ScriptUiSupport
+{
 
 QJsonObject widgetSchema()
 {
@@ -74,7 +76,8 @@ QJsonObject exampleNode()
     // An id no widget has: what a dry run answers must not name a real one.
     return QJsonObject{{"id", -1}, {"name", "okButton"}, {"class", "QPushButton"},
                        {"rect", QJsonObject{{"x", 0}, {"y", 0}, {"width", 80}, {"height", 24}}},
-                       {"visible", true}, {"enabled", true}, {"focus", false}, {"text", "OK"}};
+                       {"visibleRect", QJsonObject{{"x", 0}, {"y", 0}, {"width", 80}, {"height", 24}}},
+                       {"clipped", false}, {"visible", true}, {"enabled", true}, {"focus", false}, {"text", "OK"}};
 }
 
 // The id a script knows the widget by: given on first sight, kept in the
@@ -119,6 +122,13 @@ QJsonObject rectJson(const QRectF& rect)
 {
     return QJsonObject{{"x", rect.x()}, {"y", rect.y()}, {"width", rect.width()}, {"height", rect.height()}};
 }
+
+} // namespace ScriptUiSupport
+
+using namespace ScriptUiSupport;
+
+namespace
+{
 
 QJsonObject sizeJson(const QSizeF& size)
 {
@@ -651,8 +661,8 @@ ScriptUi::~ScriptUi()
             delete widget.data();
     }
     if (m_engine && m_engine->property(kOwner).toULongLong() == qulonglong(quintptr(this))) {
-        for (const char* name : kMethods)
-            m_engine->unregisterMethod(QString::fromLatin1(name));
+        for (const QString& name : std::as_const(m_methods))
+            m_engine->unregisterMethod(name);
         m_engine->setProperty(kOwner, QVariant());
     }
 }
@@ -760,10 +770,13 @@ bool ScriptUi::isReadable(const QWidget* widget, const QString& name, const QVar
 QJsonObject ScriptUi::node(QWidget* widget) const
 {
     const QPoint topLeft = m_root->mapFromGlobal(widget->mapToGlobal(QPoint(0, 0)));
+    const QRect visible = ItemGeometry::visibleRect(widget, m_root);
     QJsonObject result{{"id", widgetId(widget)},
                        {"name", widget->objectName()},
                        {"class", className(widget)},
                        {"rect", rectJson(QRect(topLeft, widget->size()))},
+                       {"visibleRect", visible.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(rectJson(visible))},
+                       {"clipped", visible.size() != widget->size()},
                        {"visible", widget->isVisible()},
                        {"enabled", widget->isEnabled()},
                        {"focus", widget->window()->focusWidget() == widget}};
@@ -822,6 +835,8 @@ QJsonObject ScriptUi::info(QWidget* widget) const
     result.insert("sizePolicy", toJson(QVariant::fromValue(widget->sizePolicy())));
     if (m_textReadable)
         result.insert("toolTip", widget->toolTip());
+    if (const auto* area = qobject_cast<const QAbstractScrollArea*>(widget))
+        result.insert("scroll", ItemGeometry::scroll(area));
 
     // How the root sits in its parent is outside what scripts see.
     QJsonValue parentLayout = QJsonValue::Null;
@@ -866,17 +881,22 @@ QJsonValue ScriptUi::find(const QJsonObject& query) const
     return found;
 }
 
-QJsonValue ScriptUi::at(int x, int y) const
+QWidget* ScriptUi::widgetAt(const QPoint& point) const
 {
-    const QPoint point(x, y);
     if (!m_root->rect().contains(point))
-        return QJsonValue::Null;
+        return nullptr;
     QWidget* hit = m_root->childAt(point);
     if (!hit)
         hit = m_root;
     // Under a hidden widget: the nearest one above it a script may see.
     while (hit && !isVisible(hit))
         hit = hit->parentWidget();
+    return hit;
+}
+
+QJsonValue ScriptUi::at(int x, int y) const
+{
+    QWidget* hit = widgetAt(QPoint(x, y));
     return hit ? QJsonValue(node(hit)) : QJsonValue(QJsonValue::Null);
 }
 
@@ -926,12 +946,14 @@ QJsonValue ScriptUi::tabOrder(QWidget* widget) const
 void ScriptUi::add(ScriptMethod method, ScriptMethodHandler handler, bool readOnly)
 {
     method.setGroup(QStringLiteral("UI")).setReadOnly(readOnly);
+    m_methods.append(method.name());
     m_engine->registerMethod(method, std::move(handler));
 }
 
 void ScriptUi::addAsync(ScriptMethod method, AsyncScriptMethodHandler handler)
 {
     method.setGroup(QStringLiteral("UI")).setReadOnly(false);
+    m_methods.append(method.name());
     m_engine->registerAsyncMethod(method, std::move(handler));
 }
 
@@ -958,7 +980,8 @@ void ScriptUi::registerMethods()
     const QJsonObject widget = widgetSchema();
     const QJsonObject rect{{"x", 0}, {"y", 0}, {"width", 80}, {"height", 24}};
     const QJsonObject example = exampleNode();
-    const QString nodeText = QStringLiteral("{id, name, class, rect (root coordinates), visible, enabled, focus, text?}");
+    const QString nodeText = QStringLiteral("{id, name, class, rect (root coordinates), visibleRect, clipped, "
+                                            "visible, enabled, focus, text?}");
 
     add(ScriptMethod(QStringLiteral("ui.root"))
             .setDescription(QStringLiteral("The root widget scripts see: ") + nodeText + ".")
@@ -1041,13 +1064,15 @@ void ScriptUi::registerMethods()
     detail.insert("sizePolicy", QJsonObject{{"horizontal", "Minimum"}, {"vertical", "Fixed"},
                                             {"horizontalStretch", 0}, {"verticalStretch", 0}});
     detail.insert("toolTip", "");
+    detail.insert("scroll", QJsonObject{{"x", 0}, {"y", 0}, {"maxX", 0}, {"maxY", 0}});
     detail.insert("parentLayout", QJsonObject{{"owner", 3}, {"type", "QHBoxLayout"}, {"index", 1}, {"stretch", 0}});
     detail.insert("layout", QJsonValue::Null);
     add(ScriptMethod(QStringLiteral("ui.info"))
             .setDescription(QStringLiteral("The node plus geometry (in the parent), size hints, minimum and maximum "
                                            "size, size policy, tool tip, the layout the widget sits in "
-                                           "(parentLayout: owner, type, index, stretch or row/column/spans) and "
-                                           "its own layout (type, spacing, margins, items), or null."))
+                                           "(parentLayout: owner, type, index, stretch or row/column/spans), "
+                                           "its own layout (type, spacing, margins, items) or null, and for a "
+                                           "scroll area scroll: {x, y, maxX, maxY}."))
             .addRawParameter(QStringLiteral("widget"), widget)
             .setReturns(QStringLiteral("object"), QString(), detail),
         [this](const QJsonObject& args) -> QJsonValue {
@@ -1081,6 +1106,11 @@ void ScriptUi::registerMethods()
         [this](const QJsonObject& args) -> QJsonValue {
             return tabOrder(args.contains("widget") ? resolve(args.value("widget")) : resolveRoot());
         });
+
+    // The tools of FR-007, each set in a file of its own.
+    registerItemMethods();
+    registerTextMethods();
+    registerWindowMethods();
 }
 
 QWidget* ScriptUi::resolveRoot() const

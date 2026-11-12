@@ -10,3 +10,4 @@
 #include "tests/TST_ScriptExtensions.h"
 #include "tests/TST_ScriptCanvas.h"
 #include "tests/TST_ScriptUi.h"
+#include "tests/TST_ScriptUiItems.h"

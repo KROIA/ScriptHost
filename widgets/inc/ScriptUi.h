@@ -13,6 +13,7 @@
 class QAbstractButton;
 class QDialogButtonBox;
 class QLayout;
+class QPoint;
 class QVariant;
 class QWidget;
 
@@ -62,13 +63,29 @@ class ScriptEngine;
 //   ui.at(x, y)                     the node of the widget under the point
 //                                   (root coordinates, shown widgets only);
 //                                   null outside the root
+//   ui.items(widget, {rows?: [first, last], columns?: [first, last],
+//            all?}?)                the parts of a widget that has them:
+//                                   {kind, items: [{ref, rect, visibleRect,
+//                                   ...}], truncated?, ...}. `ref` names an
+//                                   item (see "Items" below); rects in root
+//                                   coordinates, null when the item is not
+//                                   laid out or not seen. At most 5000 items,
+//                                   then `truncated: true`. A widget without
+//                                   items is refused.
+//   ui.itemAt(x, y)                 {widget: node, item?}: the nearest widget
+//                                   with items from the one under the point
+//                                   up, with its item there as ui.items()
+//                                   lists it; without an item there, the
+//                                   node ui.at() gives. Null outside the root
 //   ui.info(widget)                 the node plus geometry (local, in its
 //                                   parent), size hints, minimum and maximum
 //                                   size, size policy, tool tip, the layout it
 //                                   sits in (`parentLayout`) and its own
 //                                   (`layout`: type, spacing, margins, items
 //                                   with index and stretch, row/column/spans,
-//                                   or form row/role)
+//                                   or form row/role); a scroll area also
+//                                   `scroll`: {x, y, maxX, maxY}, its scroll
+//                                   bars' values
 //   ui.property(widget, name)       a readable Q_PROPERTY as JSON
 //   ui.focused()                    the node of the focus widget, or null
 //   ui.tabOrder(widget?)            the nodes of the widget's window (default:
@@ -179,9 +196,17 @@ class ScriptEngine;
 //                                   null.
 //   ui.disconnect(widget, signal)   stops it; returns whether it was connected
 //
+// Items: a `ref` is {row, column} (a table cell), {path: [row, row below,
+// ...], column?} (a tree item), {row} (a list item), {section} (a header
+// section), {index} (a tab, an action), {part} (a part drawn by the style).
+//
 // A node: {id, name, class, rect: {x, y, width, height} in root
-// coordinates, visible, enabled, focus (the focus widget of its window),
-// text?}. `widget` is an id (a number) or an objectName (the first in tree
+// coordinates, visibleRect, clipped, visible, enabled, focus (the focus
+// widget of its window), text?}. `visibleRect` is the part of `rect` left
+// by every ancestor up to the window - scroll areas and item viewports
+// included - or null when nothing of it is shown (also on a hidden tab
+// page); `clipped` is true when that is not the whole widget. Other windows
+// on top are not taken into account. `widget` is an id (a number) or an objectName (the first in tree
 // order). Every widget a script sees gets an id that stays its own while it
 // lives. JSON of property values: numbers, strings, booleans; enums by their
 // key name, flags as "AlignLeft|AlignTop"; sizes {width, height}, points
@@ -202,8 +227,8 @@ class ScriptEngine;
 // whose echo mode is not Normal (a password) is never returned: no `text`
 // in its node, find() does not match it, and ui.property() refuses its
 // "text", "displayText" and "selectedText". With setTextReadable(false) no
-// node has `text` or a tool tip, find() refuses `text`, and ui.property()
-// refuses every string property but "objectName".
+// node or item has `text` or a tool tip, find() refuses `text`, and
+// ui.property() refuses every string property but "objectName".
 //
 // Requested runs (ScriptEngine::requestRun) may call the ui methods like any
 // other method, under the approval rules set (setApproval): reading the UI
@@ -252,6 +277,11 @@ private:
     void registerMethods();
     void registerChangingMethods();
     void registerCreatingMethods();
+    // The tools of FR-007, each set in a file of its own; registerMethods()
+    // calls them.
+    void registerItemMethods();     // ScriptUiItems.cpp: ui.items, ui.itemAt
+    void registerTextMethods();     // ScriptUiText.cpp: ui.textGeometry, ui.popups
+    void registerWindowMethods();   // ScriptUiWindows.cpp: ui.map, ui.window
 
     // Resolving and describing widgets - what every ui tool builds on. The
     // ones that find a widget throw ScriptError when there is none.
@@ -275,6 +305,8 @@ private:
     QJsonObject layoutInfo(QLayout* layout) const;
     QJsonValue find(const QJsonObject& query) const;
     QJsonValue at(int x, int y) const;
+    // The widget under the point (root coordinates) a script may see.
+    QWidget* widgetAt(const QPoint& point) const;
     QJsonValue readProperty(QWidget* widget, const QString& name) const;
     QJsonValue focused() const;
     QJsonValue tabOrder(QWidget* widget) const;
@@ -311,8 +343,18 @@ private:
     QJsonValue connectSignal(QWidget* widget, const QString& signal);
     QJsonObject signalData(QWidget* widget, int index, void** argv) const;
 
+    // ---- ScriptUiItems.cpp
+    QJsonValue items(QWidget* widget, const QJsonObject& options) const;
+    QJsonValue itemAt(int x, int y) const;
+
+    // ---- ScriptUiText.cpp
+
+    // ---- ScriptUiWindows.cpp
+
+
     QPointer<ScriptEngine> m_engine;
     QPointer<QWidget>      m_root;
+    QStringList            m_methods;   // the names this ScriptUi registered
     bool                   m_textReadable = true;
     QHash<quint64, QList<std::function<bool()>>> m_journal;    // run -> its undo steps, oldest first
     QHash<quint64, QList<QPointer<QWidget>>>     m_created;    // run -> the top widgets it created

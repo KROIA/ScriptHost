@@ -595,7 +595,13 @@ private:
         auto* w = new Window;
         QPointer<ScriptHost::ScriptUi> ui = ScriptHost::exposeWidgets(&engine, &w->window);
 
-        // Twelve read-only methods and twenty-two changing ones, all in the group "UI".
+        // The read-only methods and the changing ones, all in the group "UI".
+        // One line per task, so that parallel work merges.
+        QStringList expectedReading{"ui.at", "ui.children", "ui.connect", "ui.disconnect", "ui.find",
+                                    "ui.focused", "ui.info", "ui.parent", "ui.property", "ui.root",
+                                    "ui.tabOrder", "ui.tree"};
+        expectedReading << "ui.items" << "ui.itemAt";   // T-025
+        expectedReading.sort();
         QStringList reading, changing;
         for (const ScriptHost::ScriptMethod& m : engine.methods()) {
             if (!m.name().startsWith("ui."))
@@ -603,9 +609,8 @@ private:
             (m.isReadOnly() ? reading : changing) << m.name();
             TEST_COMPARE(m.group(), QString("UI"));
         }
-        TEST_COMPARE(reading, (QStringList{"ui.at", "ui.children", "ui.connect", "ui.disconnect", "ui.find",
-                                           "ui.focused", "ui.info", "ui.parent", "ui.property", "ui.root",
-                                           "ui.tabOrder", "ui.tree"}));
+        reading.sort();
+        TEST_COMPARE(reading, expectedReading);
         TEST_COMPARE(changing, (QStringList{"ui.close", "ui.create", "ui.destroy", "ui.exec", "ui.hide", "ui.lower",
                                             "ui.move", "ui.moveToLayout", "ui.raise",
                                             "ui.reorder", "ui.resize", "ui.restore", "ui.setCurrentIndex",
