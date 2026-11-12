@@ -77,7 +77,30 @@ class ScriptEngine;
 //                                   up, with its item there as ui.items()
 //                                   lists it; without an item there, the
 //                                   node ui.at() gives. Null outside the root
-//   ui.info(widget)                 the node plus geometry (local, in its
+//   ui.textGeometry(widget, {from?, to?}?)
+//                                   where the text of a QLineEdit, QTextEdit,
+//                                   QPlainTextEdit or QLabel (plain text) is:
+//                                   {length, cursor: {index, rect} (null for a
+//                                   label), selection: {from, to, rects,
+//                                   text?}, range?: {from, to, rects, text?}};
+//                                   `range` when from or to is given (default
+//                                   0 and the end; an empty one gives the
+//                                   caret there). Positions are character
+//                                   indexes (a paragraph of a QTextEdit ends
+//                                   with one), `rects` one per line in root
+//                                   coordinates, not clipped. A password field
+//                                   gives rects but no text
+//   ui.popups()                     the open popups of the root, each a
+//                                   window of its own: a combo box list
+//                                   {kind: "combo", widget: node, combo, view}
+//                                   (its items: ui.items(view)), a menu {kind:
+//                                   "menu", widget, opener?} (its actions:
+//                                   ui.items(widget.id)), another popup {kind:
+//                                   "popup", widget}, and the tool tip {kind:
+//                                   "tooltip", rect, text?}. A tool tip
+//                                   belongs to the root when it lies on it or
+//                                   within 16 px of it
+//   ui.info(widget)                the node plus geometry (local, in its
 //                                   parent), size hints, minimum and maximum
 //                                   size, size policy, tool tip, the layout it
 //                                   sits in (`parentLayout`) and its own
@@ -199,6 +222,22 @@ class ScriptEngine;
 // Items: a `ref` is {row, column} (a table cell), {path: [row, row below,
 // ...], column?} (a tree item), {row} (a list item), {section} (a header
 // section), {index} (a tab, an action), {part} (a part drawn by the style).
+// Besides item views and headers, ui.items() takes:
+//   QTabBar, QTabWidget (kind "tabs"), QToolBox ("toolbox"; its page
+//   buttons): [{ref: {index}, text, rect, visibleRect, current, enabled,
+//   tooltip?}]
+//   QMenuBar, QMenu ("menu"): [{ref: {index}, text, shortcut, rect,
+//   visibleRect, enabled, visible, checkable, checked, separator, submenu}]
+//   QToolBar ("toolbar"): the same per action, with its button's rect,
+//   `widget` (the button's id) and `inOverflow` (does not fit, in the
+//   extension's menu), then the extension button {ref: {part:
+//   "extension"}, visible}
+//   parts the style draws ("parts"): [{ref: {part}, rect, visibleRect}] -
+//   QSlider "groove", "handle"; QScrollBar "addLine", "subLine", "addPage",
+//   "subPage", "slider"; QSpinBox, QDoubleSpinBox "up", "down", "edit";
+//   QComboBox "arrow", "edit"; QGroupBox "checkbox", "label"; QDockWidget
+//   "title", "close", "float"; another scroll area the parts of its shown
+//   scroll bars, "vertical.slider" ...
 //
 // A node: {id, name, class, rect: {x, y, width, height} in root
 // coordinates, visibleRect, clipped, visible, enabled, focus (the focus
@@ -216,7 +255,8 @@ class ScriptEngine;
 // type JSON has no form for.
 //
 // What scripts see: the root and the widgets below it - child windows such
-// as dialogs included - and nothing else. Never ScriptHost's own widgets
+// as dialogs included - and a menu without a parent opened from a menubar or
+// menu among them, and nothing else. Never ScriptHost's own widgets
 // (canvas, script editor, scripts panel, approval dialog), and never a
 // widget the application hid with hideWidget() or the dynamic property
 // "scripthost_hidden" set to true, nor anything below it. A layout item of
@@ -348,6 +388,11 @@ private:
     QJsonValue itemAt(int x, int y) const;
 
     // ---- ScriptUiText.cpp
+    QJsonValue textGeometry(QWidget* widget, const QJsonObject& options) const;
+    QJsonValue popups() const;
+    // The open popup windows (menus, combo box lists, ...) isVisible() lets
+    // scripts see; resolve() finds them too.
+    QList<QWidget*> popupWindows() const;
 
     // ---- ScriptUiWindows.cpp
 
