@@ -68,18 +68,6 @@ const QRectF kEverywhere(-1e6, -1e6, 2e6, 2e6);
 // Widget property: the id ui.* gave the widget (ScriptUi.cpp keeps it there).
 const char* const kWidgetId = "scripthost_id";
 
-// The rects of the text from `from` to `to` in `widget`, one per line, in its
-// coordinates; none when it has no text positions.
-// ponytail: none yet; after the T-026 merge this is
-// ItemGeometry::hasTextPositions(widget) ? ItemGeometry::textRects(widget, from, to) : {}.
-QList<QRect> textRects(const QWidget* widget, int from, int to)
-{
-    Q_UNUSED(widget);
-    Q_UNUSED(from);
-    Q_UNUSED(to);
-    return {};
-}
-
 // Moves (x, y) - placed by align / valign - to the baseline start; returns
 // the text's box. Italic overhang and antialiasing included.
 // ponytail: one line per text, no wrapping (I-011); QTextLayout when scripts need more.
@@ -593,8 +581,10 @@ bool ScriptCanvas::itemRect(const QString& key, QRectF& rect, QRectF* clip)
         local = widget->rect();
     } else if (anchor.ref.contains(QStringLiteral("text"))) {
         const QJsonObject range = anchor.ref.value(QStringLiteral("text")).toObject();
-        const QList<QRect> lines = textRects(widget, range.value(QStringLiteral("from")).toInt(),
-                                             range.value(QStringLiteral("to")).toInt());
+        const QList<QRect> lines = ItemGeometry::hasTextPositions(widget)
+            ? ItemGeometry::textRects(widget, range.value(QStringLiteral("from")).toInt(),
+                                      range.value(QStringLiteral("to")).toInt())
+            : QList<QRect>();
         // ponytail: one shape over the range's lines; a shape per line if scripts need it.
         for (const QRect& line : lines)
             local = local ? *local | line : line;

@@ -558,7 +558,7 @@ private:
         const QJsonObject button = at(w.inWindow(w.plain).center());
         TEST_COMPARE(button["widget"].toObject()["name"].toString(), QString("plain"));
         TEST_ASSERT(!button.contains("item"));
-        const QRect below = w.inWindow(w.tree);
+        const QRect below = w.inWindow(w.tree->viewport());
         const QPoint spot(below.center().x(), below.bottom() - 5);
         const QJsonObject empty = at(spot);
         TEST_COMPARE(empty["widget"].toObject(),
@@ -1139,12 +1139,7 @@ private:
         QWidget* container = p.combo->view()->window();
         TEST_COMPARE(list["widget"].toObject()["rect"].toObject(), rectJson(p.inWindow(container, container->rect())));
         const QJsonObject rows = run(engine, QString("return ui.items(%1);").arg(list["view"].toInt()));
-        if (ScriptHost::ItemGeometry::providerFor(p.combo->view())) {
-            // With the list provider of T-025.
-            TEST_COMPARE(rows["result"].toObject()["items"].toArray().size(), 3);
-        } else {
-            TEST_ASSERT(rows["message"].toString().contains("has no items"));
-        }
+        TEST_COMPARE(rows["result"].toObject()["items"].toArray().size(), 3);
         p.combo->hidePopup();
         TEST_ASSERT(TestSupport::spin([&]() { return !p.combo->view()->isVisible(); }));
 

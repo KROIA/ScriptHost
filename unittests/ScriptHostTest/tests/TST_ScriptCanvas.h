@@ -23,8 +23,12 @@
 #include <QMap>
 #include <QPainter>
 #include <QPointer>
+#include <QLineEdit>
 #include <QScrollBar>
+#include <QSlider>
+#include <QTabWidget>
 #include <QTableWidget>
+#include <QTextEdit>
 #include <QThread>
 #include <QTimer>
 #include <QWidget>
@@ -70,6 +74,8 @@ public:
         ADD_TEST(TST_ScriptCanvas::testItemAnchorHidden);
         ADD_TEST(TST_ScriptCanvas::testItemAnchorNoRepaintLoop);
         ADD_TEST(TST_ScriptCanvas::testItemAnchorErrors);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorTabAndSlider);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorTextAndScrollBar);
     }
 
 private:
@@ -1371,6 +1377,129 @@ private:
         const QJsonObject result = TestSupport::runScript(field.engine,
             "try { gfx.rect({widget: 'table', rows: 1}); } catch (e) { return e.message; }");
         TEST_COMPARE(result["result"].toString(), QString("gfx.rect: an anchor has no 'rows'"));
+    }
+
+    // Widgets with parts and text (T-026) under a canvas.
+    struct Parts
+    {
+        Field       field{320, 240};
+        QTabWidget* tabs = nullptr;
+        QSlider*    slider = nullptr;
+        QLineEdit*  line = nullptr;
+        QTextEdit*  edit = nullptr;
+
+        Parts()
+        {
+            tabs = new QTabWidget(&field.target);
+            tabs->setObjectName("tabs");
+            tabs->setGeometry(10, 10, 200, 80);
+            for (const char* name : {"One", "Two", "Three"})
+                tabs->addTab(new QWidget, name);
+            slider = new QSlider(Qt::Horizontal, &field.target);
+            slider->setObjectName("slider");
+            slider->setGeometry(10, 100, 200, 24);
+            slider->setRange(0, 100);
+            line = new QLineEdit("Hello world", &field.target);
+            line->setObjectName("line");
+            line->setGeometry(10, 130, 200, 24);
+            edit = new QTextEdit(&field.target);
+            edit->setObjectName("edit");
+            edit->setGeometry(220, 10, 90, 200);
+            edit->setLineWrapMode(QTextEdit::NoWrap);
+            QStringList lines;
+            for (int i = 0; i < 40; ++i)
+                lines << QString("line %1").arg(i);
+            edit->setPlainText(lines.join('\n'));
+            for (QWidget* w : {static_cast<QWidget*>(tabs), static_cast<QWidget*>(slider),
+                               static_cast<QWidget*>(line), static_cast<QWidget*>(edit)})
+                w->show();
+        }
+        // Where ItemGeometry puts the item, on the canvas.
+        QRect place(QWidget* widget, const QJsonObject& ref) const
+        {
+            const QRect r = ScriptHost::ItemGeometry::itemRect(widget, ref).value_or(QRect());
+            return r.translated(widget->mapTo(&field.target, QPoint()));
+        }
+        QRect text(QWidget* widget, int from, int to) const
+        {
+            QRect all;
+            for (const QRect& r : ScriptHost::ItemGeometry::textRects(widget, from, to))
+                all |= r;
+            return all.translated(widget->mapTo(&field.target, QPoint()));
+        }
+        bool red(const QRect& at) { return near(field.pixel(at.center().x(), at.center().y()), Qt::red); }
+        // The rect the script logs for `anchor` on the event "ask".
+        bool logs(Engine::RunId id, const QString& expected)
+        {
+            field.engine.postEvent("ask", QJsonObject());
+            return TestSupport::spin([&]() { return field.logs.value(id).contains(expected); });
+        }
+    };
+
+    TEST_FUNCTION(testItemAnchorTabAndSlider)
+    {
+        TEST_START;
+
+        Parts p;
+        Outcome out;
+        const Engine::RunId id = p.field.start(
+            "const tab = {widget: 'tabs', index: 1}, handle = {widget: 'slider', part: 'handle'};\n"
+            "gfx.rect(tab, {fill: 'red', stroke: 'none'});\n"
+            "gfx.rect(handle, {fill: 'red', stroke: 'none'});\n"
+            "on('ask', () => log([tab, handle].map(a => JSON.stringify(gfx.widgetRect(a))).join(' ')));\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(p.field.shown(id));
+        const QRect tab = p.place(p.tabs, QJsonObject{{"index", 1}});
+        const QRect handle = p.place(p.slider, QJsonObject{{"part", "handle"}});
+        TEST_ASSERT(!tab.isEmpty() && !handle.isEmpty());
+        TEST_ASSERT(p.logs(id, rectString(tab) + " " + rectString(handle)));
+        TEST_ASSERT(p.red(tab));
+        TEST_ASSERT(p.red(handle));
+
+        // The handle follows the value, without a present().
+        p.slider->setValue(90);
+        const QRect moved = p.place(p.slider, QJsonObject{{"part", "handle"}});
+        TEST_ASSERT(moved.left() > handle.right());
+        TEST_ASSERT(TestSupport::spin([&]() { return p.red(moved) && !p.red(handle); }));
+        TEST_COMPARE(p.field.presented.value(id).size(), 1);
+    }
+
+    TEST_FUNCTION(testItemAnchorTextAndScrollBar)
+    {
+        TEST_START;
+
+        Parts p;
+        Outcome out;
+        // "world" in the line edit; from the middle of line 1 to line 2 in the
+        // text edit (one shape over both lines); the text edit's scroll bar handle.
+        const Engine::RunId id = p.field.start(
+            "const word = {widget: 'line', text: {from: 6, to: 11}};\n"
+            "const lines = {widget: 'edit', text: {from: 9, to: 16}};\n"
+            "const bar = {widget: 'edit', part: 'vertical.slider'};\n"
+            "gfx.rect(word, {fill: 'red', stroke: 'none'});\n"
+            "gfx.rect(lines, {fill: 'red', stroke: 'none'});\n"
+            "gfx.rect(bar, {fill: 'red', stroke: 'none'});\n"
+            "on('ask', () => log([word, lines, bar].map(a => JSON.stringify(gfx.widgetRect(a))).join(' ')));\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(p.field.shown(id));
+        const QRect word = p.text(p.line, 6, 11);
+        const QRect lines = p.text(p.edit, 9, 16);
+        const QRect bar = p.place(p.edit, QJsonObject{{"part", "vertical.slider"}});
+        TEST_ASSERT(!word.isEmpty() && !bar.isEmpty());
+        TEST_ASSERT(lines.height() > word.height());                    // two lines
+        TEST_ASSERT(p.logs(id, rectString(word) + " " + rectString(lines) + " " + rectString(bar)));
+        TEST_ASSERT(p.red(word));
+        TEST_ASSERT(p.red(lines));
+        TEST_ASSERT(p.red(bar));
+
+        // Scrolled to the end: the handle goes down, the lines out of view.
+        p.edit->verticalScrollBar()->setValue(p.edit->verticalScrollBar()->maximum());
+        const QRect low = p.place(p.edit, QJsonObject{{"part", "vertical.slider"}});
+        TEST_ASSERT(low.top() > bar.bottom());
+        TEST_ASSERT(TestSupport::spin([&]() { return p.red(low) && !p.red(bar) && !p.red(lines); }));
+        TEST_COMPARE(p.field.presented.value(id).size(), 1);
     }
 };
 
