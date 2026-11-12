@@ -7,16 +7,24 @@
 // need the opt-in, the canvas stays on top and detaches when deleted, and
 // wrong arguments throw. The extras: transforms, paths, gradients, images,
 // shapes anchored to widgets, the frame loop, the helpers and the
-// application's draw functions.
+// application's draw functions. Item anchors (T-028): cells and graphics
+// items, followed while the view scrolls or zooms, clipped, hidden.
 
 #include "UnitTest.h"
 #include "TestSupport.h"
+#include "../../../widgets/src/ItemGeometry.h"
 #include <QElapsedTimer>
 #include <QFontMetricsF>
+#include <QGraphicsRectItem>
+#include <QGraphicsScene>
+#include <QGraphicsView>
+#include <QHeaderView>
 #include <QImage>
 #include <QMap>
 #include <QPainter>
 #include <QPointer>
+#include <QScrollBar>
+#include <QTableWidget>
 #include <QThread>
 #include <QTimer>
 #include <QWidget>
@@ -54,6 +62,14 @@ public:
         ADD_TEST(TST_ScriptCanvas::testDrawFunctions);
         ADD_TEST(TST_ScriptCanvas::testMemberSwitches);
         ADD_TEST(TST_ScriptCanvas::testBenchmark);
+        // T-028
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorIsTheCell);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorFollowsScrolling);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorOutOfViewAndClipped);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorFollowsZoom);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorHidden);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorNoRepaintLoop);
+        ADD_TEST(TST_ScriptCanvas::testItemAnchorErrors);
     }
 
 private:
@@ -1076,6 +1092,285 @@ private:
                 TEST_ASSERT(TestSupport::spin([&]() { return out.done; }));
             }
         }
+    }
+
+    // ---- T-028: item anchors ------------------------------------------------
+
+    // A canvas over a table: 30 rows of 24 px, 3 columns of 70 px, no row
+    // header, scrolled by pixels.
+    struct Table
+    {
+        Field         field{320, 240};
+        QWidget*      container = nullptr;
+        QTableWidget* table = nullptr;
+
+        Table()
+        {
+            container = new QWidget(&field.target);
+            container->setGeometry(0, 0, 320, 240);
+            table = new QTableWidget(30, 3, container);
+            table->setObjectName("table");
+            table->setGeometry(10, 10, 260, 200);
+            table->verticalHeader()->hide();
+            table->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+            for (int row = 0; row < 30; ++row)
+                table->setRowHeight(row, 24);
+            for (int column = 0; column < 3; ++column)
+                table->setColumnWidth(column, 70);
+            container->show();
+        }
+        // The cell on the canvas.
+        QRect cell(int row, int column) const
+        {
+            const QRect rect = table->visualRect(table->model()->index(row, column));
+            return QRect(table->viewport()->mapTo(&field.target, rect.topLeft()), rect.size());
+        }
+        QRect viewport() const
+        {
+            return QRect(table->viewport()->mapTo(&field.target, QPoint()), table->viewport()->size());
+        }
+        bool red(const QPoint& at) { return near(field.pixel(at.x(), at.y()), Qt::red); }
+        // Pure red pixels in the area: not the coloured fringes of the header's text.
+        int reds(const QRect& area)
+        {
+            const QImage picture = field.image();
+            const qreal ratio = picture.devicePixelRatio();
+            int n = 0;
+            for (int y = area.top(); y <= area.bottom(); ++y) {
+                for (int x = area.left(); x <= area.right(); ++x) {
+                    const QColor c = picture.pixelColor(qRound(x * ratio), qRound(y * ratio));
+                    n += c.red() > 200 && c.green() < 60 && c.blue() < 60 ? 1 : 0;
+                }
+            }
+            return n;
+        }
+    };
+
+    static QString rectString(const QRect& r)
+    {
+        return QString("{\"x\":%1,\"y\":%2,\"width\":%3,\"height\":%4}").arg(r.x()).arg(r.y()).arg(r.width())
+            .arg(r.height());
+    }
+
+    // Counts the paints of a widget.
+    struct PaintCounter : QObject
+    {
+        int paints = 0;
+        bool eventFilter(QObject* watched, QEvent* event) override
+        {
+            if (event->type() == QEvent::Paint)
+                ++paints;
+            return QObject::eventFilter(watched, event);
+        }
+    };
+
+    TEST_FUNCTION(testItemAnchorIsTheCell)
+    {
+        TEST_START;
+
+        Table t;
+        // The id ui.* would give it; no ScriptUi here.
+        t.table->setProperty("scripthost_id", 900001);
+        Outcome out;
+        const Engine::RunId id = t.field.start(
+            "gfx.rect({widget: 'table', row: 2, column: 1}, {fill: 'red', stroke: 'none'});\n"
+            "on('ask', () => log([gfx.widgetRect({widget: 'table', row: 2, column: 1}),\n"
+            "                     gfx.widgetRect({widget: 900001, row: 2, column: 1}),\n"
+            "                     gfx.widgetRect({widget: 900001}),\n"
+            "                     gfx.widgetRect({widget: 'table', row: 99, column: 0})].map(JSON.stringify).join(' ')));\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(t.field.shown(id));
+        const QRect cell = t.cell(2, 1);
+        // Exactly the cell: every pixel of it red, none around it.
+        TEST_COMPARE(t.field.count(cell, true), cell.width() * cell.height());
+        TEST_COMPARE(t.field.count(cell.adjusted(-6, -6, 6, 6), true), cell.width() * cell.height());
+
+        t.field.engine.postEvent("ask", QJsonObject());
+        const QString expected = rectString(cell) + " " + rectString(cell) + " "
+            + rectString(QRect(10, 10, 260, 200)) + " null";
+        TEST_ASSERT(TestSupport::spin([&]() { return t.field.logs.value(id).contains(expected); }));
+    }
+
+    TEST_FUNCTION(testItemAnchorFollowsScrolling)
+    {
+        TEST_START;
+
+        Table t;
+        Outcome out;
+        const Engine::RunId id = t.field.start(
+            "gfx.rect({widget: 'table', row: 5, column: 1}, {fill: 'red', stroke: 'none'});\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(t.field.shown(id));
+        const QRect before = t.cell(5, 1);
+        TEST_ASSERT(t.red(before.center()));
+
+        // Scrolled: it moves up with the cell.
+        t.table->verticalScrollBar()->setValue(48);
+        const QRect scrolled = t.cell(5, 1);
+        TEST_COMPARE(scrolled.top(), before.top() - 48);
+        TEST_ASSERT(TestSupport::spin([&]() { return t.red(scrolled.center()) && !t.red(before.center()); }));
+        // A wider column before it: it moves right.
+        t.table->setColumnWidth(0, 100);
+        const QRect wider = t.cell(5, 1);
+        TEST_COMPARE(wider.left(), scrolled.left() + 30);
+        TEST_ASSERT(TestSupport::spin([&]() {
+            return t.red(QPoint(wider.right() - 2, wider.center().y()))
+                   && !t.red(QPoint(scrolled.left() + 2, scrolled.center().y()));
+        }));
+        // All without another present().
+        TEST_COMPARE(t.field.presented.value(id).size(), 1);
+    }
+
+    TEST_FUNCTION(testItemAnchorOutOfViewAndClipped)
+    {
+        TEST_START;
+
+        Table t;
+        Outcome out;
+        const Engine::RunId id = t.field.start(
+            "gfx.rect({widget: 'table', row: 5, column: 0}, {fill: 'red', stroke: 'none'});\n"
+            "gfx.rect({widget: 'table', row: 5, column: 1, clip: false}, {fill: 'blue', stroke: 'none'});\n"
+            "gfx.rect({widget: 'table', row: 20, column: 2}, {fill: 'red', stroke: 'none'});\n"
+            "on('ask', () => log(JSON.stringify(gfx.widgetRect({widget: 'table', row: 20, column: 2}))));\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(t.field.shown(id));
+        // Row 20 is out of view: not drawn, no rect.
+        const QRect view = t.viewport();
+        TEST_ASSERT(t.cell(20, 2).top() > view.bottom());
+        TEST_COMPARE(t.reds(QRect(0, view.bottom() + 1, 320, 240 - view.bottom() - 1)), 0);
+        t.field.engine.postEvent("ask", QJsonObject());
+        TEST_ASSERT(TestSupport::spin([&]() { return t.field.logs.value(id).contains("null"); }));
+
+        // Row 5 half under the header: the clipped shape stays out of the
+        // header, the one with clip: false covers it.
+        t.table->verticalScrollBar()->setValue(5 * 24 + 10);
+        const QRect red = t.cell(5, 0);
+        const QRect blue = t.cell(5, 1);
+        TEST_COMPARE(red.top(), view.top() - 10);
+        const int header = view.top() - 5;
+        TEST_ASSERT(TestSupport::spin([&]() {
+            return t.red(QPoint(red.left() + 5, view.top() + 5))
+                   && near(t.field.pixel(blue.left() + 5, header), Qt::blue);
+        }));
+        TEST_ASSERT(!t.red(QPoint(red.left() + 5, header)));
+        TEST_COMPARE(t.reds(QRect(0, 0, 320, view.top())), 0);
+    }
+
+    TEST_FUNCTION(testItemAnchorFollowsZoom)
+    {
+        TEST_START;
+        namespace Geometry = ScriptHost::ItemGeometry;
+
+        Field field(320, 240);
+        auto* scene = new QGraphicsScene(0, 0, 600, 600, &field.target);
+        auto* item = scene->addRect(280, 280, 40, 40, QPen(Qt::NoPen));
+        auto* view = new QGraphicsView(scene, &field.target);
+        view->setObjectName("view");
+        view->setGeometry(10, 10, 260, 200);
+        view->centerOn(300, 300);
+        view->show();
+        Geometry::ListContext context;
+        context.root = &field.target;
+        const QJsonObject listed = Geometry::providerFor(view)->list(view, context);
+        const int index = listed["items"].toArray().first()["ref"].toObject()["index"].toInt();
+        // Where the item is on the canvas now.
+        const auto place = [&]() {
+            const QRect r = view->mapFromScene(item->sceneBoundingRect()).boundingRect();
+            return QRect(view->viewport()->mapTo(&field.target, r.topLeft()), r.size());
+        };
+
+        Outcome out;
+        const Engine::RunId id = field.start(
+            QString("gfx.rect({widget: 'view', index: %1}, {fill: 'red', stroke: 'none'});\n"
+                    "gfx.present();").arg(index),
+            out);
+        TEST_ASSERT(field.shown(id));
+        const QRect before = place();
+        TEST_ASSERT(near(field.pixel(before.center().x(), before.center().y()), Qt::red));
+        const int area = field.count(QRect(0, 0, 320, 240), true);
+        TEST_ASSERT(area > 30 * 30);
+
+        // Zoomed in twice: four times the red, where the item is now.
+        view->scale(2, 2);
+        const QRect after = place();
+        TEST_ASSERT(after.width() > before.width() * 3 / 2);
+        TEST_ASSERT(TestSupport::spin([&]() { return field.count(QRect(0, 0, 320, 240), true) > area * 3; }));
+        TEST_ASSERT(near(field.pixel(after.left() + 2, after.top() + 2), Qt::red));
+        TEST_COMPARE(field.presented.value(id).size(), 1);
+    }
+
+    TEST_FUNCTION(testItemAnchorHidden)
+    {
+        TEST_START;
+
+        Table t;
+        // A table in a window of its own, a child of the target.
+        auto* window = new QWidget(&t.field.target, Qt::Window);
+        window->setAttribute(Qt::WA_DontShowOnScreen);
+        auto* other = new QTableWidget(5, 2, window);
+        other->setObjectName("other");
+        window->setGeometry(0, 0, 200, 150);
+        window->show();
+        Outcome out;
+        const Engine::RunId id = t.field.start(
+            "gfx.rect({widget: 'table', row: 1, column: 0}, {fill: 'red', stroke: 'none'});\n"
+            "gfx.rect({widget: 'other', row: 0, column: 0}, {fill: 'red', stroke: 'none'});\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(t.field.shown(id));
+        const QRect cell = t.cell(1, 0);
+        const int shown = cell.width() * cell.height();
+        TEST_COMPARE(t.reds(QRect(0, 0, 320, 240)), shown);      // not the other window's
+
+        // An ancestor hidden: nothing.
+        t.container->hide();
+        TEST_ASSERT(TestSupport::spin([&]() { return t.reds(QRect(0, 0, 320, 240)) == 0; }));
+        t.container->show();
+        TEST_ASSERT(TestSupport::spin([&]() { return t.reds(QRect(0, 0, 320, 240)) == shown; }));
+        // Hidden from scripts (ScriptUi::hideWidget): nothing, from its next paint on.
+        t.container->setProperty("scripthost_hidden", true);
+        t.table->viewport()->update();
+        TEST_ASSERT(TestSupport::spin([&]() { return t.reds(QRect(0, 0, 320, 240)) == 0; }));
+    }
+
+    TEST_FUNCTION(testItemAnchorNoRepaintLoop)
+    {
+        TEST_START;
+
+        Table t;
+        PaintCounter counter;
+        t.field.canvas->installEventFilter(&counter);
+        Outcome out;
+        const Engine::RunId id = t.field.start(
+            "gfx.rect({widget: 'table', row: 2, column: 1}, {fill: 'red', stroke: 'none', opacity: 0.5});\n"
+            "gfx.present();",
+            out);
+        TEST_ASSERT(t.field.shown(id));
+        t.field.image();
+        TestSupport::spin([]() { return false; }, 100);
+        // The canvas's repaint repaints the table under it, whose paint
+        // resolves the anchor again: the same place, no new repaint.
+        const int settled = counter.paints;
+        t.table->viewport()->update();
+        t.field.canvas->update();
+        TestSupport::spin([]() { return false; }, 500);
+        const int idle = counter.paints - settled;
+        std::printf("ScriptCanvas item anchor: %d canvas paints while idle\n", idle);
+        std::fflush(stdout);
+        TEST_ASSERT(idle <= 3);
+    }
+
+    TEST_FUNCTION(testItemAnchorErrors)
+    {
+        TEST_START;
+
+        Field field;
+        const QJsonObject result = TestSupport::runScript(field.engine,
+            "try { gfx.rect({widget: 'table', rows: 1}); } catch (e) { return e.message; }");
+        TEST_COMPARE(result["result"].toString(), QString("gfx.rect: an anchor has no 'rows'"));
     }
 };
 

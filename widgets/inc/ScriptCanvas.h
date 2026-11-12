@@ -112,6 +112,23 @@ struct CanvasShared;
 // widget found by its name for the first time after the frame was presented
 // shows at the run's next present(). Anchored shapes ignore the transform.
 //
+// Item anchors: an object {widget: objectName | id from ui.*, ...ref} anchors
+// to a part of the widget, ref as ui.items names it: {row, column} a cell,
+// {path, column} a tree item, {row} a list item, {section} a header section,
+// {index} a tab or an action, {index} a graphics item (its id), {part} a part
+// the style draws; {text: {from, to}} a range of its text. Without a ref:
+// the whole widget. The item's place comes from ItemGeometry at paint time,
+// so the shape follows scrolling, resizing, sorting, zooming and moves. It is
+// not drawn while the item is gone or out of view, the widget is hidden (or
+// an ancestor), hidden from scripts or one of ScriptHost's own, or in another
+// window than `target` (a menu or popup: attach a canvas to that window).
+// clip: true (the default) cuts the shape where the view cuts the item (the
+// viewport, the scroll areas, the window); not for arrows. Ids from ui.* work
+// without exposeWidgets(). What repaints: the anchored widget's and its
+// viewport's paints (a scroll, a layout change, a new value all repaint
+// them), its and its parents' moves, resizes, shows and hides; the canvas
+// repaints only when a resolved place changed.
+//
 // Frames: gfx.onFrame(fn) calls fn(dt) - dt in milliseconds since its last
 // frame - at the screen's refresh rate (60 when unknown), from one GUI timer
 // that runs while some run has a frame handler. A handler slower than that
@@ -192,8 +209,16 @@ private:
     // A watched widget moved, was shown, hidden or deleted (nullptr).
     void anchorsMoved(QObject* widget);
     QWidget* anchorWidget(const QString& name);
-    // Where the widget is on the canvas; false when it is missing or hidden.
-    bool anchorRect(const QString& name, QRectF& rect);
+    // Its moves, and its parents' (scrolling), repaint the layers that have it.
+    void watch(QWidget* widget);
+    // Its paints resolve the anchors again (later, once).
+    void watchPaints(QWidget* widget);
+    // The widget of a widget or item anchor (texts[] of a frame), as last found.
+    QWidget* anchoredWidget(const QString& key) const;
+    // Where the widget or item is on the canvas; false when it is missing,
+    // hidden or out of view. `clip`: an item's view, when it asks for one.
+    bool anchorRect(const QString& key, QRectF& rect, QRectF* clip = nullptr);
+    bool itemRect(const QString& key, QRectF& rect, QRectF* clip);
     void startFrames();
     void tickFrames();
 

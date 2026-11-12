@@ -1,8 +1,12 @@
 #include "ScriptCanvas.h"
 #include "CanvasExtension.h"
+#include "ItemGeometry.h"
+#include "ScriptUiSupport.h"
+#include <QAbstractScrollArea>
 #include <QChildEvent>
 #include <QFontMetricsF>
 #include <QImage>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
 #include <QMutexLocker>
@@ -26,6 +30,15 @@ struct CanvasDraw
     ScriptCanvas::BoundsFunction bounds;
 };
 
+// An item anchor, read once from its text (kItemAnchor + JSON).
+struct CanvasAnchor
+{
+    QJsonValue        widget;       // its objectName or its id
+    QJsonObject       ref;          // the item; empty: the whole widget
+    bool              clip = true;
+    QPointer<QWidget> found;
+};
+
 // What is on screen: the newest frame each run presented, by run - in
 // run-start order, as RunIds count up - and what the canvas keeps for them.
 struct CanvasLayers
@@ -36,6 +49,10 @@ struct CanvasLayers
     QHash<QString, CanvasDraw>             draws;
     QHash<QString, QPointer<QWidget>>      widgets;    // anchors found by name
     QSet<QObject*>                         watched;    // anchors and their parents
+    // ponytail: item anchors by their text, never pruned; prune with the frames if scripts make thousands.
+    QHash<QString, CanvasAnchor>           items;
+    QSet<QObject*>                         painted;    // item anchors and their viewports
+    bool                                   resolveQueued = false;
     QTimer*                                frameTimer = nullptr;
 };
 
@@ -47,6 +64,21 @@ const char* const kOwner = "scripthost_canvas";
 
 // A custom call without bounds: everywhere.
 const QRectF kEverywhere(-1e6, -1e6, 2e6, 2e6);
+
+// Widget property: the id ui.* gave the widget (ScriptUi.cpp keeps it there).
+const char* const kWidgetId = "scripthost_id";
+
+// The rects of the text from `from` to `to` in `widget`, one per line, in its
+// coordinates; none when it has no text positions.
+// ponytail: none yet; after the T-026 merge this is
+// ItemGeometry::hasTextPositions(widget) ? ItemGeometry::textRects(widget, from, to) : {}.
+QList<QRect> textRects(const QWidget* widget, int from, int to)
+{
+    Q_UNUSED(widget);
+    Q_UNUSED(from);
+    Q_UNUSED(to);
+    return {};
+}
 
 // Moves (x, y) - placed by align / valign - to the baseline start; returns
 // the text's box. Italic overhang and antialiasing included.
@@ -134,6 +166,11 @@ void paintFrame(QPainter& painter, const CanvasFrame& frame, const QRectF& area,
             current = item.style;
         }
         const double* v = frame.coords.data() + item.first;
+        const bool clipped = !item.clip.isNull();
+        if (clipped) {
+            painter.save();
+            painter.setClipRect(item.clip);
+        }
         switch (item.op) {
         case CanvasItem::Rect:
             painter.drawRect(QRectF(v[0], v[1], v[2], v[3]));
@@ -193,6 +230,8 @@ void paintFrame(QPainter& painter, const CanvasFrame& frame, const QRectF& area,
         default:
             break;
         }
+        if (clipped)
+            painter.restore();
     }
     painter.resetTransform();
 }
@@ -235,6 +274,8 @@ ScriptCanvas::~ScriptCanvas()
     }
     // The filter reads m_layers, which goes before QWidget's destructor.
     for (QObject* watched : std::as_const(m_layers->watched))
+        watched->removeEventFilter(this);
+    for (QObject* watched : std::as_const(m_layers->painted))
         watched->removeEventFilter(this);
     if (parentWidget())
         parentWidget()->removeEventFilter(this);
@@ -449,8 +490,14 @@ QWidget* ScriptCanvas::anchorWidget(const QString& name)
             break;
         }
     }
-    // Its moves, and its parents' (scrolling), repaint the layers that have it.
-    for (QWidget* w = found; w && w != target; w = w->parentWidget()) {
+    watch(found);
+    return found;
+}
+
+void ScriptCanvas::watch(QWidget* widget)
+{
+    QWidget* target = parentWidget();
+    for (QWidget* w = widget; w && w != target; w = w->parentWidget()) {
         if (m_layers->watched.contains(w))
             break;
         m_layers->watched.insert(w);
@@ -461,15 +508,108 @@ QWidget* ScriptCanvas::anchorWidget(const QString& name)
             QMetaObject::invokeMethod(this, [this]() { anchorsMoved(nullptr); }, Qt::QueuedConnection);
         });
     }
-    return found;
 }
 
-bool ScriptCanvas::anchorRect(const QString& name, QRectF& rect)
+void ScriptCanvas::watchPaints(QWidget* widget)
 {
-    QWidget* widget = anchorWidget(name);
+    if (m_layers->painted.contains(widget))
+        return;
+    m_layers->painted.insert(widget);
+    widget->installEventFilter(this);
+    connect(widget, &QObject::destroyed, this, [this, widget]() { m_layers->painted.remove(widget); });
+}
+
+QWidget* ScriptCanvas::anchoredWidget(const QString& key) const
+{
+    if (key.startsWith(kItemAnchor))
+        return m_layers->items.value(key).found;
+    return m_layers->widgets.value(key);
+}
+
+bool ScriptCanvas::anchorRect(const QString& key, QRectF& rect, QRectF* clip)
+{
+    if (key.startsWith(kItemAnchor))
+        return itemRect(key, rect, clip);
+    QWidget* widget = anchorWidget(key);
     if (!widget || !widget->isVisibleTo(parentWidget()))
         return false;
     rect = QRectF(QRect(widget->mapTo(parentWidget(), QPoint()), widget->size()));
+    return true;
+}
+
+bool ScriptCanvas::itemRect(const QString& key, QRectF& rect, QRectF* clip)
+{
+    QWidget* target = parentWidget();
+    auto it = m_layers->items.find(key);
+    if (it == m_layers->items.end()) {
+        CanvasAnchor anchor;
+        anchor.ref = QJsonDocument::fromJson(key.mid(1).toUtf8()).object();    // made by the glue
+        anchor.widget = anchor.ref.take(QStringLiteral("widget"));
+        anchor.clip = anchor.ref.take(QStringLiteral("clip")).toBool(true);
+        it = m_layers->items.insert(key, anchor);
+    }
+    CanvasAnchor& anchor = *it;
+    QWidget* widget = nullptr;
+    if (anchor.widget.isString()) {
+        widget = anchorWidget(anchor.widget.toString());
+    } else {
+        // An id from ui.*: no ScriptUi needed, the widget keeps it.
+        widget = anchor.found;
+        const int id = anchor.widget.toInt(0);
+        if (!widget || !target->isAncestorOf(widget) || widget->property(kWidgetId).toInt() != id) {
+            widget = nullptr;
+            // ponytail: a scan of the target's children while the id is not
+            // found; an id-to-widget map in ScriptUiSupport if that shows up.
+            const QList<QWidget*> all = target->findChildren<QWidget*>();
+            for (QWidget* candidate : all) {
+                const QVariant has = candidate->property(kWidgetId);
+                if (candidate != this && has.isValid() && has.toInt() == id) {
+                    widget = candidate;
+                    break;
+                }
+            }
+            watch(widget);
+        }
+    }
+    anchor.found = widget;
+    if (!widget || widget->window() != target->window() || !widget->isVisibleTo(target))
+        return false;
+    for (const QWidget* w = widget; w != target; w = w->parentWidget()) {
+        if (ScriptUiSupport::isExcluded(w))
+            return false;
+    }
+    // A scroll area's items live in its viewport; the parts the style draws
+    // (its scroll bars) do not.
+    QWidget* area = widget;
+    auto* scrollArea = qobject_cast<QAbstractScrollArea*>(widget);
+    if (scrollArea && !anchor.ref.isEmpty() && !anchor.ref.contains(QStringLiteral("part")))
+        area = scrollArea->viewport();
+    watchPaints(widget);
+    if (scrollArea)
+        watchPaints(scrollArea->viewport());
+
+    std::optional<QRect> local;
+    if (anchor.ref.isEmpty()) {
+        local = widget->rect();
+    } else if (anchor.ref.contains(QStringLiteral("text"))) {
+        const QJsonObject range = anchor.ref.value(QStringLiteral("text")).toObject();
+        const QList<QRect> lines = textRects(widget, range.value(QStringLiteral("from")).toInt(),
+                                             range.value(QStringLiteral("to")).toInt());
+        // ponytail: one shape over the range's lines; a shape per line if scripts need it.
+        for (const QRect& line : lines)
+            local = local ? *local | line : line;
+    } else {
+        local = ItemGeometry::itemRect(widget, anchor.ref);
+    }
+    if (!local)
+        return false;
+    const QRect inArea = local->translated(area->mapFrom(widget, QPoint()));
+    if (ItemGeometry::visiblePart(area, inArea).isEmpty())
+        return false;
+    const QPoint offset = area->mapTo(target, QPoint());
+    rect = QRectF(inArea.translated(offset));
+    if (clip && anchor.clip)
+        *clip = QRectF(ItemGeometry::visiblePart(area, area->rect()).translated(offset));
     return true;
 }
 
@@ -484,10 +624,12 @@ void ScriptCanvas::resolveAnchors(CanvasFrame& frame)
         if (item.anchor < 0 && item.anchor2 < 0)
             continue;
         item.bounds = QRectF();     // not drawn while a widget is missing or hidden
+        item.clip = QRectF();
         const CanvasStyle& style = frame.styles[size_t(item.style)];
         QRectF a;
         QRectF b;
-        if ((item.anchor >= 0 && !anchorRect(frame.texts.at(item.anchor), a))
+        QRectF clip;
+        if ((item.anchor >= 0 && !anchorRect(frame.texts.at(item.anchor), a, &clip))
             || (item.anchor2 >= 0 && !anchorRect(frame.texts.at(item.anchor2), b)))
             continue;
         const double pad = style.padding;
@@ -533,10 +675,15 @@ void ScriptCanvas::resolveAnchors(CanvasFrame& frame)
             v[3] = p2.y();
             const double reach = m + style.arrowHead();
             item.bounds = QRectF(p1, p2).normalized().adjusted(-reach, -reach, reach, reach);
+            clip = QRectF();        // it points at the item: not cut
             break;
         }
         default:
             break;
+        }
+        if (!clip.isNull()) {
+            item.clip = clip;
+            item.bounds = item.bounds.intersected(clip);
         }
         frame.anchored |= item.bounds;
     }
@@ -554,7 +701,7 @@ void ScriptCanvas::anchorsMoved(QObject* widget)
                 for (int anchor : {item.anchor, item.anchor2}) {
                     if (anchor < 0)
                         continue;
-                    QWidget* w = m_layers->widgets.value(frame.texts.at(anchor));
+                    QWidget* w = anchoredWidget(frame.texts.at(anchor));
                     holds = holds || (w && (w == moved || moved->isAncestorOf(w)));
                 }
                 if (holds)
@@ -563,9 +710,25 @@ void ScriptCanvas::anchorsMoved(QObject* widget)
             if (!holds)
                 continue;
         }
+        // Repainted only when a place changed: the canvas's own repaint
+        // repaints the widgets under it, and their paints come back here.
+        QVarLengthArray<QRectF, 32> before;
+        for (const CanvasItem& item : frame.items) {
+            if (item.anchor >= 0 || item.anchor2 >= 0)
+                before << item.bounds << item.clip;
+        }
         const QRectF old = frame.anchored;
         resolveAnchors(frame);
-        update((old | frame.anchored).toAlignedRect());
+        int i = 0;
+        bool changed = false;
+        for (const CanvasItem& item : frame.items) {
+            if (item.anchor < 0 && item.anchor2 < 0)
+                continue;
+            changed = changed || item.bounds != before[i] || item.clip != before[i + 1];
+            i += 2;
+        }
+        if (changed)
+            update((old | frame.anchored).toAlignedRect());
     }
 }
 
@@ -583,13 +746,26 @@ bool ScriptCanvas::eventFilter(QObject* watched, QEvent* event)
                     raise();
             }, Qt::QueuedConnection);
         }
-    } else if (m_layers->watched.contains(watched)) {
+    } else {
         switch (event->type()) {
         case QEvent::Move:
         case QEvent::Resize:
         case QEvent::Show:
         case QEvent::Hide:
-            anchorsMoved(watched);
+            if (m_layers->watched.contains(watched))
+                anchorsMoved(watched);
+            break;
+        case QEvent::Paint:
+            // A scroll, a layout change, a sort, a zoom, a new value: each
+            // repaints an item anchor's widget or viewport. Resolved after
+            // the paint, once for all paints until then.
+            if (m_layers->painted.contains(watched) && !m_layers->resolveQueued) {
+                m_layers->resolveQueued = true;
+                QMetaObject::invokeMethod(this, [this]() {
+                    m_layers->resolveQueued = false;
+                    anchorsMoved(nullptr);
+                }, Qt::QueuedConnection);
+            }
             break;
         default:
             break;

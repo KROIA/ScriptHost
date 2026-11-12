@@ -80,8 +80,9 @@ struct CanvasStyle
 //   Path                 paths[extra]
 //   Image                x, y, w, h, sx, sy, sw, sh; texts[extra] the name
 //   Custom               calls[extra]
-// Anchored (anchor / anchor2: texts[] the widget's name): the numbers are
-// written on the GUI thread from the widget's place; no transform.
+// Anchored (anchor / anchor2: texts[] the widget's name, or for an item
+// anchor kItemAnchor and its JSON): the numbers are written on the GUI
+// thread from the widget's or item's place; no transform.
 struct CanvasItem
 {
     enum Op : quint8 { Rect, RoundedRect, Ellipse, Line, Arrow, Polyline, Polygon, Text, Path, Image, Custom };
@@ -95,7 +96,12 @@ struct CanvasItem
     int    anchor = -1;             // the shape's widget, the arrow's start
     int    anchor2 = -1;            // the arrow's end
     QRectF bounds;                  // what it may paint, on the canvas; null: nothing
+    QRectF clip;                    // an item anchor's view, on the canvas; null: none
 };
+
+// What an item anchor's text in CanvasFrame::texts starts with; a widget
+// anchor's is its objectName.
+const QChar kItemAnchor(1);
 
 struct CanvasCall
 {
