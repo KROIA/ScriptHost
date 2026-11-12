@@ -72,6 +72,34 @@ class ScriptEngine;
 //                                   laid out or not seen. At most 5000 items,
 //                                   then `truncated: true`. A widget without
 //                                   items is refused.
+//                                   Item views (QTableView, QTreeView,
+//                                   QListView, their widget classes, other
+//                                   QAbstractItemViews) and QHeaderView:
+//                                   {kind: "table"|"tree"|"list"|"view"|
+//                                    "header",
+//                                    visibleRows, visibleColumns: [first,
+//                                          last] in view, or null,
+//                                    scroll: {x, y, maxX, maxY} (the scroll
+//                                          bars' values: pixels or items, by
+//                                          the view's scroll mode),
+//                                    items: [{ref, text, rect, visibleRect,
+//                                          selected, current, enabled,
+//                                          checked? (true, false, "partial"),
+//                                          expanded?, hasChildren? (trees)}],
+//                                    truncated?,
+//                                    headers? (a table or tree: its shown
+//                                          headers, [{widget, orientation,
+//                                          items: [{ref: {section}, text,
+//                                          rect, visibleRect}]}], as
+//                                          ui.items(header) lists them)}.
+//                                   By default the items in view - in a tree
+//                                   the rows shown, below expanded ones only;
+//                                   `rows`/`columns` list those model rows
+//                                   and columns instead (a tree: top-level
+//                                   rows with their expanded part; a header:
+//                                   the range along it), `all` every row or
+//                                   column not given as a range, in a tree
+//                                   also below collapsed rows.
 //   ui.itemAt(x, y)                 {widget: node, item?}: the nearest widget
 //                                   with items from the one under the point
 //                                   up, with its item there as ui.items()
