@@ -25,7 +25,10 @@ namespace ScriptHost
 //                                    level, then below that, ...
 //   {row}                            an item of a list
 //   {section}                        a section of a header
-//   {index}                          a tab, an action
+//   {index}                          a tab, an action: its position
+//   {index}                          a graphics item: an id unique in
+//                                    its scene that stays the same, not
+//                                    a position
 //   {part}                           a part drawn by the style
 //   {text: {from, to}}               a range of text
 //

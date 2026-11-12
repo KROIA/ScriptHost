@@ -78,8 +78,9 @@ void ScriptUi::registerItemMethods()
             .setDescription(QStringLiteral(
                 "The parts of a widget that has them: {kind, items: [{ref, rect, visibleRect, ...}], "
                 "truncated?, ...}. ref names the item: {row, column} in a table, {path: [row, ...], column} in a "
-                "tree, {row} in a list, {section} in a header, {index} for tabs and actions, {part} for parts "
-                "the style draws. Rects in root coordinates; null when the item is not laid out or not seen. By "
+                "tree, {row} in a list, {section} in a header, {index} for tabs and actions (a position) and for "
+                "graphics items (a stable id, not a position), {part} for parts the style draws. Rects in root "
+                "coordinates; null when the item is not laid out or not seen. By "
                 "default the items in view; rows/columns ranges or all list more, at most 5000."))
             .addRawParameter(QStringLiteral("widget"), widgetSchema())
             .addRawParameter(QStringLiteral("options"),
