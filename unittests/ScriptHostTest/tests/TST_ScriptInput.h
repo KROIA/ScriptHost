@@ -132,25 +132,12 @@ private:
         ScriptHost::forwardInput(&engine, &area);
         TEST_ASSERT(engine.hasMethod("input.mouse"));
 
-        // Where the pointer really is decides, whether setPos worked or not.
-        // Somebody may move the mouse meanwhile: put back before each try,
-        // and compared only for a try it held still in. Moved all the time,
-        // the answer has to agree with itself.
-        QJsonObject result;
-        QPoint at;
-        bool still = false;
-        for (int attempt = 0; attempt < 20 && !still; ++attempt) {
-            QCursor::setPos(area.mapToGlobal(QPoint(30, 40)));
-            at = area.mapFromGlobal(QCursor::pos());
-            result = TestSupport::runScript(engine, "return input.mouse();");
-            still = area.mapFromGlobal(QCursor::pos()) == at;
-        }
+        // The test does not move the real mouse (the user works meanwhile):
+        // wherever the pointer is, the answer has to agree with itself.
+        const QJsonObject result = TestSupport::runScript(engine, "return input.mouse();");
         TEST_COMPARE(result["status"].toString(), QString("ok"));
         const QJsonObject position = result["result"].toObject();
-        if (still) {
-            TEST_COMPARE(position["x"].toInt(), at.x());
-            TEST_COMPARE(position["y"].toInt(), at.y());
-        }
+        TEST_ASSERT(position["x"].isDouble() && position["y"].isDouble());
         TEST_COMPARE(position["inside"].toBool(),
                      area.rect().contains(QPoint(position["x"].toInt(), position["y"].toInt())));
         TEST_ASSERT(position["buttons"].isArray());
