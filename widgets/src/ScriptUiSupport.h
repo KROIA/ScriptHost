@@ -26,6 +26,10 @@ bool isExcluded(const QWidget* widget);
 bool isPassword(const QWidget* widget);
 QString className(const QObject* object);
 QJsonObject rectJson(const QRectF& rect);
+// For a menu without a parent: the widget it was opened from (its menu
+// action's menubar, menu, ...) that has a parent; else nullptr. Defined in
+// ScriptUiText.cpp.
+QWidget* popupOpener(const QWidget* widget);
 
 } // namespace ScriptUiSupport
 } // namespace ScriptHost

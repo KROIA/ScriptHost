@@ -107,5 +107,17 @@ QJsonObject rectJson(const QRect& rect);
 // not seen.
 void addRects(QJsonObject* item, const QWidget* area, const QRect& rect, const QWidget* root);
 
+// ---- text (ItemGeometryParts.cpp) ------------------------------------------
+
+// QLineEdit, QTextEdit, QPlainTextEdit and a QLabel with plain text.
+bool hasTextPositions(const QWidget* widget);
+// The positions in its text: QString indexes, a paragraph of a QTextEdit
+// ends with one.
+int textLength(const QWidget* widget);
+// One rect per line for the text from `from` to `to` (clamped, from <= to)
+// in the widget's coordinates, not clipped to what is seen; from == to gives
+// the caret there, 1 wide. Empty for other widgets.
+QList<QRect> textRects(const QWidget* widget, int from, int to);
+
 } // namespace ItemGeometry
 } // namespace ScriptHost

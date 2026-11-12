@@ -675,7 +675,8 @@ void ScriptUi::hideWidget(QWidget* widget, bool hidden)
 
 bool ScriptUi::isVisible(const QWidget* widget) const
 {
-    for (const QWidget* w = widget; w; w = w->parentWidget()) {
+    // A menu without a parent belongs where it was opened from (T-026).
+    for (const QWidget* w = widget; w; w = w->parentWidget() ? w->parentWidget() : popupOpener(w)) {
         if (isExcluded(w))
             return false;
         if (w == m_root)
@@ -713,7 +714,7 @@ QWidget* ScriptUi::resolve(const QJsonValue& widget) const
 {
     // ponytail: a walk of the visible tree per call, a few hundred widgets
     // at most; an id -> widget hash if trees get much larger.
-    const QList<QWidget*> widgets = visibleWidgets();
+    const QList<QWidget*> widgets = visibleWidgets() + popupWindows();
     if (widget.isDouble()) {
         const int id = widget.toInt();
         // Ids start at 1; a widget not seen yet has none (0).
