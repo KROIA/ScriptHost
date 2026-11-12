@@ -113,7 +113,32 @@ class ScriptEngine;
 //                                   with index and stretch, row/column/spans,
 //                                   or form row/role); a scroll area also
 //                                   `scroll`: {x, y, maxX, maxY}, its scroll
-//                                   bars' values
+//                                   bars' values; `covered`: whether another
+//                                   window of the application is on top of
+//                                   its visibleRect, and then `coveredBy`:
+//                                   the ids of those windows scripts see.
+//                                   Other programs' windows are not seen;
+//                                   the stacking order is the window
+//                                   system's on Windows, elsewhere a guess
+//                                   (active, popup, stay-on-top, owned)
+//   ui.map(widget?, pointOrRect, from, to)
+//                                   a point {x, y} or rect {x, y, width,
+//                                   height} from one space to another, the
+//                                   same shape back. Spaces: "widget" (the
+//                                   widget given; needed for this space),
+//                                   "root", "window" (the widget's - default
+//                                   the root's - top-level window without its
+//                                   frame), "frame" (with it), "screen"
+//                                   (logical pixels of the desktop). Pass
+//                                   null for no widget
+//   ui.window(widget?)              the widget's top-level window (default:
+//                                   the root's): {id (null when scripts do
+//                                   not see it), title, geometry,
+//                                   frameGeometry (screen coordinates),
+//                                   active, minimized, maximized, fullScreen,
+//                                   modal, screen: {name, geometry,
+//                                   availableGeometry, devicePixelRatio,
+//                                   logicalDpi}}
 //   ui.property(widget, name)       a readable Q_PROPERTY as JSON
 //   ui.focused()                    the node of the focus widget, or null
 //   ui.tabOrder(widget?)            the nodes of the widget's window (default:
@@ -227,14 +252,23 @@ class ScriptEngine;
 // Items: a `ref` is {row, column} (a table cell), {path: [row, row below,
 // ...], column?} (a tree item), {row} (a list item), {section} (a header
 // section), {index} (a tab, an action), {part} (a part drawn by the style).
+// In a QGraphicsView, {index} is an id of the item that stays its own while
+// it lives (kept in the item's data); ui.items(view) lists the items in view,
+// topmost first, or with all: true every item of the scene, each {ref, type
+// ("rect", "text", ... or "user<n>"), className? (a QGraphicsObject),
+// sceneRect, rect, visibleRect, z, visible, enabled, selected, tooltip?,
+// data0? (the item's data(0))}, plus `scroll`.
 //
 // A node: {id, name, class, rect: {x, y, width, height} in root
 // coordinates, visibleRect, clipped, visible, enabled, focus (the focus
-// widget of its window), text?}. `visibleRect` is the part of `rect` left
-// by every ancestor up to the window - scroll areas and item viewports
-// included - or null when nothing of it is shown (also on a hidden tab
-// page); `clipped` is true when that is not the whole widget. Other windows
-// on top are not taken into account. `widget` is an id (a number) or an objectName (the first in tree
+// widget of its window), text?, window?}. `visibleRect` is the part of
+// `rect` left by every ancestor up to the window - scroll areas and item
+// viewports included - or null when nothing of it is shown (also on a hidden
+// tab page); `clipped` is true when that is not the whole widget. Other
+// windows on top are not taken into account here (see `covered` of
+// ui.info). `window` is the id of the widget's top-level window when that
+// is not the root's (a dialog, a popup): its rects are still in root
+// coordinates, through the screen. `widget` is an id (a number) or an objectName (the first in tree
 // order). Every widget a script sees gets an id that stays its own while it
 // lives. JSON of property values: numbers, strings, booleans; enums by their
 // key name, flags as "AlignLeft|AlignTop"; sizes {width, height}, points
@@ -378,7 +412,8 @@ private:
     // ---- ScriptUiText.cpp
 
     // ---- ScriptUiWindows.cpp
-
+    // Adds `covered` and, when covered, `coveredBy` to ui.info's answer.
+    void addCoverage(QJsonObject* info, QWidget* widget) const;
 
     QPointer<ScriptEngine> m_engine;
     QPointer<QWidget>      m_root;

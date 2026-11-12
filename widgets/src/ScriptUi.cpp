@@ -783,6 +783,8 @@ QJsonObject ScriptUi::node(QWidget* widget) const
     QString text;
     if (readText(widget, &text))
         result.insert("text", text);
+    if (widget->window() != m_root->window())
+        result.insert("window", widgetId(widget->window()));
     return result;
 }
 
@@ -837,6 +839,7 @@ QJsonObject ScriptUi::info(QWidget* widget) const
         result.insert("toolTip", widget->toolTip());
     if (const auto* area = qobject_cast<const QAbstractScrollArea*>(widget))
         result.insert("scroll", ItemGeometry::scroll(area));
+    addCoverage(&result, widget);
 
     // How the root sits in its parent is outside what scripts see.
     QJsonValue parentLayout = QJsonValue::Null;
@@ -1067,12 +1070,15 @@ void ScriptUi::registerMethods()
     detail.insert("scroll", QJsonObject{{"x", 0}, {"y", 0}, {"maxX", 0}, {"maxY", 0}});
     detail.insert("parentLayout", QJsonObject{{"owner", 3}, {"type", "QHBoxLayout"}, {"index", 1}, {"stretch", 0}});
     detail.insert("layout", QJsonValue::Null);
+    detail.insert("covered", false);
     add(ScriptMethod(QStringLiteral("ui.info"))
             .setDescription(QStringLiteral("The node plus geometry (in the parent), size hints, minimum and maximum "
                                            "size, size policy, tool tip, the layout the widget sits in "
                                            "(parentLayout: owner, type, index, stretch or row/column/spans), "
                                            "its own layout (type, spacing, margins, items) or null, and for a "
-                                           "scroll area scroll: {x, y, maxX, maxY}."))
+                                           "scroll area scroll: {x, y, maxX, maxY}. covered: whether another "
+                                           "window of the application is on top of its visible part, then "
+                                           "coveredBy: [window ids] (other programs' windows are not seen)."))
             .addRawParameter(QStringLiteral("widget"), widget)
             .setReturns(QStringLiteral("object"), QString(), detail),
         [this](const QJsonObject& args) -> QJsonValue {

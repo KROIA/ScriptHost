@@ -601,6 +601,7 @@ private:
                                     "ui.focused", "ui.info", "ui.parent", "ui.property", "ui.root",
                                     "ui.tabOrder", "ui.tree"};
         expectedReading << "ui.items" << "ui.itemAt";   // T-025
+        expectedReading << "ui.map" << "ui.window";     // T-027
         expectedReading.sort();
         QStringList reading, changing;
         for (const ScriptHost::ScriptMethod& m : engine.methods()) {
